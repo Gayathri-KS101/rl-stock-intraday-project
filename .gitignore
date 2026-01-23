@@ -1,0 +1,96 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Testing and coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Data files (optional - adjust per project)
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.db
+*.sqlite
+*.sqlite3
+
+# Large ML artifacts (comment out if you want to track models)
+*.pkl
+*.pickle
+*.h5
+*.pt
+*.pth
+*.onnx
+models/
+checkpoints/
+
+# Temporary and OS files
+.tmp/
+*.log
+*.pot
+.env
+.env.local
+.env.*.local
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Generated plots and reports (optional - adjust per project)
+*.png
+*.jpg
+*.pdf
+results/
+reports/

@@ -1,0 +1,23 @@
+# Direct dependencies for rl-stock-intraday
+# Python 3.12+ compatible
+
+# Data and numerical computing
+numpy==2.4.0
+pandas==2.3.3
+
+# Visualization
+matplotlib==3.10.8
+
+# Reinforcement learning environment
+gymnasium==0.28.1
+
+# Deep learning framework (CPU-only by default; see below for CUDA)
+torch==2.9.1+cpu
+
+# Type hints and compatibility
+typing-extensions>=4.13.0
+
+# NOTE: To install GPU/CUDA-enabled PyTorch instead:
+# python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu118
+# (adjust cu118 to your CUDA version: cu118 for CUDA 11.8, cu121 for CUDA 12.1, etc.)
+
