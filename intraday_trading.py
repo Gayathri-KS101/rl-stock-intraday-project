@@ -18,120 +18,59 @@ torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
 
-# --- Technical Indicator Helpers ---
-def calculate_rsi(prices, period=14):
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_macd(prices, slow=26, fast=12, signal=9):
-    exp1 = prices.ewm(span=fast, adjust=False).mean()
-    exp2 = prices.ewm(span=slow, adjust=False).mean()
-    macd = exp1 - exp2
-    signal_line = macd.ewm(span=signal, adjust=False).mean()
-    return macd, signal_line
-
-def add_technical_indicators(df):
-    df = df.copy()
-    # Ensure no division by zero in returns
-    df['rsi'] = calculate_rsi(df['close'], period=14).fillna(50) # Default to neutral 50
-    macd, signal = calculate_macd(df['close'])
-    df['macd'] = macd.fillna(0)
-    df['macd_signal'] = signal.fillna(0)
-    
-    # Bollinger Bands (20, 2)
-    sma20 = df['close'].rolling(window=20).mean()
-    std20 = df['close'].rolling(window=20).std()
-    upper = sma20 + (std20 * 2)
-    lower = sma20 - (std20 * 2)
-    # %B indicator which nicely normalizes price location within bands
-    # Avoid division by zero
-    diff = upper - lower
-    df['bb_pct'] = ((df['close'] - lower) / diff).fillna(0.5) 
-     
-    return df.fillna(0)
-
 # Load Data
 def load_data(file_path):
+    """Load CSV data and prepare for training."""
     if not os.path.exists(file_path):
         print(f"File not found: {file_path}")
         return None
     df = pd.read_csv(file_path)
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
-    
-    # Pre-calculate indicators for the whole dataset for efficiency
-    df = add_technical_indicators(df)
-    
-    # --- Add Daily Context (Long-term trends) ---
-    # Resample to daily to get broader trends
-    daily_df = df.resample('1D', on='date').agg({'close': 'last'}).dropna()
-    
-    # Calculate Daily SMAs and Previous Close
-    daily_df['daily_sma_5'] = daily_df['close'].rolling(window=5).mean()
-    daily_df['daily_sma_20'] = daily_df['close'].rolling(window=20).mean()
-    daily_df['prev_close'] = daily_df['close'].shift(1)
-    
-    # Reset index to merge
-    daily_df = daily_df.reset_index()
-    daily_df['day_date'] = daily_df['date'].dt.date
-    
-    # Create a mapping key in original df
-    df['day_date'] = df['date'].dt.date
-    
-    # Merge daily stats back to intraday df
-    df = df.merge(daily_df[['day_date', 'daily_sma_5', 'daily_sma_20', 'prev_close']], on='day_date', how='left')
-    
-    # Calculate Context Features (available for every minute)
-    # 1. Trend 5d: How far is price above/below 5-day average
-    df['trend_5d'] = (df['close'] / df['daily_sma_5']) - 1.0
-    
-    # 2. Trend 20d: How far is price above/below 20-day average
-    df['trend_20d'] = (df['close'] / df['daily_sma_20']) - 1.0
-    
-    # 3. Gap: How much did we gap from yesterday's close?
-    # Uses the OPEN of the CURRENT day vs Close of PREV day. 
-    # Since we are row-by-row, we can just use current open / prev_close - 1
-    # But let's use current close / prev_close - 1 for a dynamic "change from yesterday"
-    df['change_from_prev_close'] = (df['close'] / df['prev_close']) - 1.0
-    
-    # Fill NaNs (first few days won't have headers)
-    df = df.fillna(0)
-    
     return df
 
-class StockTradingEnv(gym.Env):
+class SimplifiedStockTradingEnv(gym.Env):
+    """
+    Simplified trading environment with minimal state:
+    - Normalized price window
+    - Shares held (normalized)
+    - Balance (normalized)
+    
+    Actions:
+    - 0 = Hold
+    - 1 = Buy exactly 1 share
+    - 2 = Sell exactly 1 share
+    
+    Reward: Change in net worth between steps
+    """
     def __init__(self, df, initial_balance=10000, window_size=20):
-        super(StockTradingEnv, self).__init__()
+        super(SimplifiedStockTradingEnv, self).__init__()
         self.df = df.reset_index(drop=True)
         self.initial_balance = initial_balance
         self.window_size = window_size
         self.n_steps = len(df)
         
-        # Actions: 0=Hold, 1=Buy, 2=Sell
+        # Actions: 0=Hold, 1=Buy 1 share, 2=Sell 1 share
         self.action_space = spaces.Discrete(3)
         
-        # State: 
-        # Price History (Normalized): window_size
-        # Volume History (Normalized): window_size
-        # Technicals: [RSI, MACD, Signal, BB%] * 1 (Current Step) -> 4 features
-        # Account: [SharesHeld (Normalized), Balance (Normalized), Unrealized PnL (Normalized)] -> 3 features
-        # Intraday Context: [TimeProgress] -> 1 feature
-        # Daily Context: [Trend5d, Trend20d, ChangeFromPrev] -> 3 features
+        # State: Price History + Shares Held + Balance
+        # - Price window (normalized): window_size features
+        # - Shares held (normalized): 1 feature
+        # - Balance (normalized): 1 feature
+        total_features = window_size + 2
         
-        self.n_historics = 2 # Price, Volume
-        self.n_technicals = 4 # RSI, MACD, Signal, BB%
-        self.n_account = 3
-        self.n_context = 1 + 3 # Time + 3 Daily Context features
-        
-        total_features = (self.n_historics * window_size) + self.n_technicals + self.n_account + self.n_context
-        
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_features,), dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=-np.inf, 
+            high=np.inf, 
+            shape=(total_features,), 
+            dtype=np.float32
+        )
         
         # Commission fee (0.1%)
-        self.commission = 0.001 
+        self.commission = 0.001
+        
+        # Track number of trades
+        self.num_trades = 0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -142,71 +81,43 @@ class StockTradingEnv(gym.Env):
         self.max_net_worth = self.initial_balance
         self.current_step = self.window_size
         self.history = []
-        self.trades = []
+        self.num_trades = 0
         
         return self._next_observation(), {}
     
     def _next_observation(self):
-        # Window of data
+        """
+        Construct minimal state:
+        1. Normalized price window
+        2. Normalized shares held
+        3. Normalized balance
+        """
+        # Window of price data
         frame = self.df.iloc[self.current_step - self.window_size : self.current_step]
         current_row = self.df.iloc[self.current_step - 1]
         
         # 1. Price History (Normalized relative to start of window)
-        # This makes the agent robust to any price level (100 or 10000)
         window_start_price = frame['close'].iloc[0]
-        if window_start_price == 0: window_start_price = 1e-8 # Safety
+        if window_start_price == 0:
+            window_start_price = 1e-8  # Safety
         
         prices_norm = (frame['close'].values / window_start_price) - 1.0
         
-        # 2. Volume History (Normalized by window mean)
-        vol_mean = frame['volume'].mean()
-        if vol_mean == 0: vol_mean = 1.0
-        volumes_norm = (frame['volume'].values / vol_mean) - 1.0
-        
-        # 3. Technicals (Already somewhat normalized, but let's scale)
-        # RSI is 0-100 -> scale to 0-1
-        rsi = current_row['rsi'] / 100.0
-        # MACD values are small, usually < 1% of price. Normalize by price
-        macd = current_row['macd'] / current_row['close'] * 100 # Multiplied for visibility
-        signal = current_row['macd_signal'] / current_row['close'] * 100
-        bb_pct = current_row['bb_pct'] # Already normalized approx 0-1
-        
-        technicals = np.array([rsi, macd, signal, bb_pct])
-        
-        # 4. Account Data
-        # Shares held: Normalize by theoretical max shares (balance / price)
-        # But balance changes. Let's use a loose normalization or log scale.
-        # Simple: Shares / (InitialBalance / CurrentPrice)
+        # 2. Shares Held (Normalized by theoretical max shares)
         max_possible_shares = self.initial_balance / current_row['close']
         shares_norm = self.shares_held / max_possible_shares if max_possible_shares > 0 else 0
         
+        # 3. Balance (Normalized by initial balance)
         balance_norm = self.balance / self.initial_balance
         
-        unrealized_pnl = 0
-        if self.shares_held > 0:
-            unrealized_pnl = (current_row['close'] - self.cost_basis) / self.cost_basis
-            
-        account_state = np.array([shares_norm, balance_norm, unrealized_pnl])
-        
-        # 5. Context
-        time_progress = self.current_step / self.n_steps
-        
-        # Daily Context
-        trend_5d = current_row['trend_5d']
-        trend_20d = current_row['trend_20d']
-        change_prev = current_row['change_from_prev_close']
-        
-        context = np.array([time_progress, trend_5d, trend_20d, change_prev])
-        
+        # Concatenate state
         state = np.concatenate([
-            prices_norm, 
-            volumes_norm, 
-            technicals, 
-            account_state,
-            context
+            prices_norm,
+            [shares_norm],
+            [balance_norm]
         ])
         
-        # Safety clip to avoid infs messing up NN
+        # Safety clip to avoid infs
         state = np.clip(state, -10, 10)
         
         return state.astype(np.float32)
@@ -215,74 +126,49 @@ class StockTradingEnv(gym.Env):
         current_row = self.df.iloc[self.current_step]
         current_price = current_row['close']
         
-        reward = 0
         done = False
         
-        # Force sell at end of day
+        # Force sell at end of episode
         if self.current_step >= self.n_steps - 1:
             done = True
             if self.shares_held > 0:
-                action = 2 
-        
-        trade_occurred = False
+                action = 2
         
         # Execute Action
-        if action == 1: # Buy
-            # Logic: Buy 25% of current buying power
-            # To allow accumulation
-            spend = self.balance * 0.25
+        if action == 1:  # Buy exactly 1 share
+            cost = current_price
+            fee = cost * self.commission
+            total_outflow = cost + fee
             
-            # Simple logic: If we have enough for 1 share and spend > price
-            if self.balance >= current_price:
-                # Ensure we buy at least 1 share if we have money
-                if spend < current_price: spend = current_price
+            if self.balance >= total_outflow:
+                self.balance -= total_outflow
                 
-                shares_bought = int(spend // current_price)
-                if shares_bought > 0:
-                    cost = shares_bought * current_price
-                    fee = cost * self.commission
-                    total_outflow = cost + fee
-                    
-                    if self.balance >= total_outflow:
-                        self.balance -= total_outflow
-                        
-                        # Update Avg Cost
-                        prev_total_cost = self.shares_held * self.cost_basis
-                        self.shares_held += shares_bought
-                        self.cost_basis = (prev_total_cost + cost) / self.shares_held
-                        trade_occurred = True
+                # Update average cost basis
+                prev_total_cost = self.shares_held * self.cost_basis
+                self.shares_held += 1
+                self.cost_basis = (prev_total_cost + cost) / self.shares_held
+                self.num_trades += 1
         
-        elif action == 2: # Sell
-             # Logic: Sell 50% of holding - allows scaling out
-             # Or simplify to Sell All for clearer learning sign
+        elif action == 2:  # Sell exactly 1 share
             if self.shares_held > 0:
-                # Sell ALL for now to simplify learning the "Exit" signal
-                shares_to_sell = self.shares_held 
-                revenue = shares_to_sell * current_price
+                revenue = current_price
                 fee = revenue * self.commission
                 net_revenue = revenue - fee
                 
-                profit = net_revenue - (shares_to_sell * self.cost_basis)
-                
                 self.balance += net_revenue
-                self.shares_held -= shares_to_sell
+                self.shares_held -= 1
                 if self.shares_held == 0:
                     self.cost_basis = 0
                 
-                # Reward for realizing profit? 
-                # Better to reward total net worth change, but realizing profit is a strong signal
-                trade_occurred = True
+                self.num_trades += 1
 
         self.current_step += 1
         
+        # Calculate new net worth
         new_net_worth = self.balance + (self.shares_held * current_price)
         
-        # Reward Function
-        # 1. Change in Net Worth (The ultimate goal)
-        reward = (new_net_worth - self.net_worth)
-        
-        # 2. Small penalty for holding over long time with no gain? 
-        # Or penalty for trading too much? Commission handles trading penalty.
+        # Reward: Change in net worth
+        reward = new_net_worth - self.net_worth
         
         self.net_worth = new_net_worth
         if self.net_worth > self.max_net_worth:
@@ -297,7 +183,7 @@ class DQN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(DQN, self).__init__()
         self.fc1 = nn.Linear(input_dim, 128)
-        self.fc2 = nn.Linear(128, 256) # Increased capacity
+        self.fc2 = nn.Linear(128, 256)
         self.fc3 = nn.Linear(256, 128)
         self.fc4 = nn.Linear(128, output_dim)
         
@@ -322,7 +208,7 @@ class ReplayBuffer:
 
 
 # ============================================================================
-# INTERPRETABILITY & VISUALIZATION HELPERS (NEW CODE ONLY)
+# INTERPRETABILITY & VISUALIZATION HELPERS
 # ============================================================================
 
 def create_episode_logger():
@@ -343,13 +229,7 @@ def create_episode_logger():
         'Shares_Held': [],
         'Balance': [],
         'Net_Worth': [],
-        'Reward': [],
-        'RSI': [],
-        'MACD': [],
-        'BB_Pct': [],
-        'Trend_5d': [],
-        'Trend_20d': [],
-        'Change_From_Prev_Close': []
+        'Reward': []
     }
 
 
@@ -399,12 +279,6 @@ def log_step(logger, episode, step, env, state, action, q_values, epsilon, rewar
     logger['Balance'].append(env.balance)
     logger['Net_Worth'].append(env.net_worth)
     logger['Reward'].append(reward)
-    logger['RSI'].append(current_row['rsi'])
-    logger['MACD'].append(current_row['macd'])
-    logger['BB_Pct'].append(current_row['bb_pct'])
-    logger['Trend_5d'].append(current_row['trend_5d'])
-    logger['Trend_20d'].append(current_row['trend_20d'])
-    logger['Change_From_Prev_Close'].append(current_row['change_from_prev_close'])
 
 
 def save_episode_log(logger, episode, output_dir='episode_logs'):
@@ -573,39 +447,15 @@ def analyze_episode_decisions(df):
     print(f"   Exploration (Random): {exploration_count:4d} ({exploration_count/total*100:5.2f}%)")
     print(f"   Exploitation (Max Q): {exploitation_count:4d} ({exploitation_count/total*100:5.2f}%)")
     
-    # 5. Correlation: RSI and Buy decisions
-    print("\n5. TECHNICAL INDICATOR CORRELATIONS:")
-    print("-" * 50)
-    
-    # Binary indicators for actions
-    df_analysis = df.copy()
-    df_analysis['is_buy'] = (df_analysis['Action'] == 1).astype(int)
-    df_analysis['is_sell'] = (df_analysis['Action'] == 2).astype(int)
-    
-    # RSI correlation with Buy
-    rsi_buy_corr = df_analysis[['RSI', 'is_buy']].corr().iloc[0, 1]
-    print(f"   RSI vs Buy decisions:      {rsi_buy_corr:7.4f}")
-    
-    # Trend_20d correlation with Sell
-    trend20_sell_corr = df_analysis[['Trend_20d', 'is_sell']].corr().iloc[0, 1]
-    print(f"   Trend_20d vs Sell decisions: {trend20_sell_corr:7.4f}")
-    
-    # Additional correlations
-    macd_buy_corr = df_analysis[['MACD', 'is_buy']].corr().iloc[0, 1]
-    print(f"   MACD vs Buy decisions:     {macd_buy_corr:7.4f}")
-    
-    bb_buy_corr = df_analysis[['BB_Pct', 'is_buy']].corr().iloc[0, 1]
-    print(f"   BB_Pct vs Buy decisions:   {bb_buy_corr:7.4f}")
-    
-    # 6. Q-value statistics
-    print("\n6. Q-VALUE STATISTICS (Overall):")
+    # 5. Q-value statistics
+    print("\n5. Q-VALUE STATISTICS (Overall):")
     print("-" * 50)
     print(f"   Q_Hold - Mean: {df['Q_Hold'].mean():7.2f}, Std: {df['Q_Hold'].std():7.2f}")
     print(f"   Q_Buy  - Mean: {df['Q_Buy'].mean():7.2f}, Std: {df['Q_Buy'].std():7.2f}")
     print(f"   Q_Sell - Mean: {df['Q_Sell'].mean():7.2f}, Std: {df['Q_Sell'].std():7.2f}")
     
-    # 7. Performance summary
-    print("\n7. PERFORMANCE SUMMARY:")
+    # 6. Performance summary
+    print("\n6. PERFORMANCE SUMMARY:")
     print("-" * 50)
     initial_nw = df['Net_Worth'].iloc[0]
     final_nw = df['Net_Worth'].iloc[-1]
@@ -621,13 +471,13 @@ def analyze_episode_decisions(df):
 
 
 # ============================================================================
-# MODIFIED TRAINING FUNCTION (Minimal changes, only adds logging calls)
+# TRAINING FUNCTION
 # ============================================================================
 
 def train_agent():
-    parser = argparse.ArgumentParser(description='Train stock trading agent.')
-    parser.add_argument('--episodes', type=int, default=50, help='Number of training episodes')
-    parser.add_argument('--log-episodes', type=int, default=5, 
+    parser = argparse.ArgumentParser(description='Train simplified stock trading agent.')
+    parser.add_argument('--episodes', type=int, default=200, help='Number of training episodes')
+    parser.add_argument('--log-episodes', type=int, default=10, 
                         help='Save detailed logs every N episodes (0 to disable)')
     args = parser.parse_args()
 
@@ -639,11 +489,12 @@ def train_agent():
     
     for file_path in all_files:
         df = load_data(file_path)
-        if df is None: continue
+        if df is None:
+            continue
         
         # Group by Day
         df['day'] = df['date'].dt.date
-        # Only take days with enough data (e.g. at least 100 minutes)
+        # Only take days with enough data (e.g. at least 60 minutes)
         daily_groups = [group for _, group in df.groupby('day') if len(group) > 60]
         all_daily_groups.extend(daily_groups)
     
@@ -653,8 +504,8 @@ def train_agent():
         
     print(f"Loaded {len(all_daily_groups)} trading days total.")
     
-    # Init Agent (using dummy env to get shapes)
-    dummy_env = StockTradingEnv(all_daily_groups[0])
+    # Initialize Agent
+    dummy_env = SimplifiedStockTradingEnv(all_daily_groups[0])
     input_dim = dummy_env.observation_space.shape[0]
     output_dim = dummy_env.action_space.n
     
@@ -664,26 +515,35 @@ def train_agent():
     target_net = DQN(input_dim, output_dim)
     target_net.load_state_dict(policy_net.state_dict())
     
-    optimizer = optim.Adam(policy_net.parameters(), lr=0.0005) # Lower LR for stability
-    replay_buffer = ReplayBuffer(50000) # Larger buffer
+    optimizer = optim.Adam(policy_net.parameters(), lr=0.0005)
+    replay_buffer = ReplayBuffer(50000)
     
-    # Hyperparams
+    # Hyperparameters
     batch_size = 64
     gamma = 0.99
     epsilon = 1.0
-    epsilon_decay = 0.995 # Slower decay
+    epsilon_decay = 0.995
     epsilon_min = 0.05
     episodes = args.episodes
     
     rewards_history = []
     
-    print("Starting Intraday Training...")
+    # Episode metrics logger
+    episode_metrics = {
+        'Episode': [],
+        'Total_Reward': [],
+        'Final_Net_Worth': [],
+        'Percent_Return': [],
+        'Number_of_Trades': []
+    }
+    
+    print("Starting Simplified Intraday Training...")
     
     # Training Loop
     for episode in range(episodes):
         # Pick a random day
         day_data = random.choice(all_daily_groups)
-        env = StockTradingEnv(day_data)
+        env = SimplifiedStockTradingEnv(day_data)
         
         state, _ = env.reset()
         total_reward = 0
@@ -726,7 +586,8 @@ def train_agent():
             total_reward += reward
             step_count += 1
             
-            if len(replay_buffer) > 2000: # Wait for buffer to fill a bit
+            # Train from replay buffer
+            if len(replay_buffer) > 2000:
                 transitions = replay_buffer.sample(batch_size)
                 batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
                 
@@ -744,13 +605,23 @@ def train_agent():
                 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0) # Gradient clipping
+                nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
                 optimizer.step()
         
         # Post-episode processing
         epsilon = max(epsilon_min, epsilon * epsilon_decay)
         if episode % 10 == 0:
             target_net.load_state_dict(policy_net.state_dict())
+        
+        # Calculate episode metrics
+        percent_return = ((env.net_worth - env.initial_balance) / env.initial_balance) * 100
+        
+        # Log episode metrics
+        episode_metrics['Episode'].append(episode + 1)
+        episode_metrics['Total_Reward'].append(total_reward)
+        episode_metrics['Final_Net_Worth'].append(env.net_worth)
+        episode_metrics['Percent_Return'].append(percent_return)
+        episode_metrics['Number_of_Trades'].append(env.num_trades)
         
         # Save and analyze episode log
         if should_log:
@@ -769,20 +640,49 @@ def train_agent():
             
             # Analyze decisions
             analyze_episode_decisions(log_df)
-            
+        
         rewards_history.append(total_reward)
-        print(f"Episode {episode+1}: Day {env.df.iloc[0]['date'].date()} | Reward: {total_reward:.2f} | Final Balance: {env.balance:.2f} | Net Worth: {env.net_worth:.2f} | Epsilon: {epsilon:.2f}")
+        print(f"Episode {episode+1}: Reward: {total_reward:.2f} | Net Worth: ${env.net_worth:.2f} | Return: {percent_return:.2f}% | Trades: {env.num_trades} | Epsilon: {epsilon:.2f}")
+        
+        # Generate training plot every 50 episodes
+        if (episode + 1) % 50 == 0:
+            plt.figure(figsize=(12, 6))
+            plt.plot(rewards_history)
+            plt.title(f"Training Rewards (Episodes 1-{episode+1})", fontsize=14, fontweight='bold')
+            plt.xlabel("Episode", fontsize=12)
+            plt.ylabel("Total Reward", fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.savefig(f'training_rewards_ep{episode+1}.png', dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"Saved training plot: training_rewards_ep{episode+1}.png")
 
-    # Plot overall training
+    # Save episode metrics to CSV
+    metrics_df = pd.DataFrame(episode_metrics)
+    metrics_df.to_csv('episode_metrics.csv', index=False)
+    print(f"\nSaved episode metrics to: episode_metrics.csv")
+    
+    # Generate final training plot
     plt.figure(figsize=(12, 6))
     plt.plot(rewards_history)
-    plt.title("Intraday Training Rewards Over All Episodes", fontsize=14, fontweight='bold')
+    plt.title("Training Rewards Over All Episodes", fontsize=14, fontweight='bold')
     plt.xlabel("Episode", fontsize=12)
     plt.ylabel("Total Reward", fontsize=12)
     plt.grid(True, alpha=0.3)
-    plt.savefig('training_rewards.png', dpi=150, bbox_inches='tight')
+    plt.savefig('training_rewards_final.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print("\nTraining complete. Overall plot saved to training_rewards.png")
+    print("Training complete. Final plot saved to training_rewards_final.png")
+    
+    # Print summary statistics
+    print("\n" + "="*100)
+    print("TRAINING SUMMARY")
+    print("="*100)
+    print(f"Total Episodes:        {episodes}")
+    print(f"Average Reward:        {np.mean(rewards_history):.2f}")
+    print(f"Best Episode Reward:   {np.max(rewards_history):.2f}")
+    print(f"Worst Episode Reward:  {np.min(rewards_history):.2f}")
+    print(f"Average Return:        {metrics_df['Percent_Return'].mean():.2f}%")
+    print(f"Average Trades/Episode: {metrics_df['Number_of_Trades'].mean():.1f}")
+    print("="*100)
 
 if __name__ == "__main__":
     train_agent()
