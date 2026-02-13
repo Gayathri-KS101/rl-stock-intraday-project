@@ -67,7 +67,9 @@ class SimplifiedStockTradingEnv(gym.Env):
         )
         
         # Commission fee (0.1%)
-        self.commission = 0.001
+        #self.commission = 0.001
+        self.commission = 0.002
+
         
         # Track number of trades
         self.num_trades = 0
@@ -166,9 +168,28 @@ class SimplifiedStockTradingEnv(gym.Env):
         
         # Calculate new net worth
         new_net_worth = self.balance + (self.shares_held * current_price)
-        
+
+# Update max net worth FIRST
+        if new_net_worth > self.max_net_worth:
+            self.max_net_worth = new_net_worth
+
+# --- Profit component ---
+        profit = (new_net_worth - self.net_worth) / self.initial_balance
+
+# --- Drawdown penalty ---
+        drawdown = (self.max_net_worth - new_net_worth) / self.max_net_worth
+        drawdown_penalty = -3.0 * drawdown
+
+# --- Exposure penalty ---
+        exposure = (self.shares_held * current_price) / new_net_worth if new_net_worth > 0 else 0
+        exposure_penalty = -0.2 * exposure
+
+# --- Final reward ---
+        reward = profit + drawdown_penalty + exposure_penalty
+        reward = np.clip(reward, -5, 5)
+
         # Reward: Change in net worth
-        reward = new_net_worth - self.net_worth
+        #reward = new_net_worth - self.net_worth
         
         self.net_worth = new_net_worth
         if self.net_worth > self.max_net_worth:

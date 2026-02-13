@@ -88,9 +88,3 @@ checkpoints/
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Generated plots and reports (optional - adjust per project)
-*.png
-*.jpg
-*.pdf
-results/
-reports/
