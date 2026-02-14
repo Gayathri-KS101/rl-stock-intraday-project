@@ -8,6 +8,8 @@ This script orchestrates the training process with a simplified environment:
 - Logs and analyzes performance
 - Tracks episode metrics
 """
+import os
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -24,7 +26,6 @@ from simplified_environment import load_data, SimplifiedStockTradingEnv
 from simplified_agent import (DQN, ReplayBuffer, create_episode_logger, log_step,
                                save_episode_log, print_log_preview, 
                                plot_episode_performance, analyze_episode_decisions)
-
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)
@@ -93,7 +94,7 @@ def train_agent():
     print("INITIALIZING SIMPLIFIED AGENT")
     print("="*100)
     
-    # Create dummy environment to get observation/action space dimensions
+    
     dummy_env = SimplifiedStockTradingEnv(all_daily_groups[0], 
                                            initial_balance=args.initial_balance)
     input_dim = dummy_env.observation_space.shape[0]
@@ -104,20 +105,16 @@ def train_agent():
     print(f"Initial Balance:  ${args.initial_balance:,.2f}")
     print(f"Commission Rate:  {dummy_env.commission*100:.2f}%\n")
     
-    # Create policy and target networks
     policy_net = DQN(input_dim, output_dim)
     target_net = DQN(input_dim, output_dim)
     target_net.load_state_dict(policy_net.state_dict())
     
-    # Optimizer and replay buffer
     optimizer = optim.Adam(policy_net.parameters(), lr=args.learning_rate)
     replay_buffer = ReplayBuffer(50000)
     
-    # Training hyperparameters
     epsilon = 1.0
     rewards_history = []
     
-    # Episode metrics logger
     episode_metrics = {
         'Episode': [],
         'Total_Reward': [],
@@ -133,6 +130,19 @@ def train_agent():
     print(f"  Epsilon Decay:  {args.epsilon_decay}")
     print(f"  Epsilon Min:    {args.epsilon_min}")
     print(f"  Buffer Size:    50000\n")
+
+    # ========================================================================
+    # CREATE TRAINING DATA FOLDER STRUCTURE
+    # ========================================================================
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_dir = os.path.join("training_data", f"run_{timestamp}")
+    rewards_dir = os.path.join(base_dir, "training_rewards")
+    episode_csv_dir = os.path.join(base_dir, "episode_logs_csv")
+    episode_png_dir = os.path.join(base_dir, "episode_logs_png")
+
+    os.makedirs(rewards_dir, exist_ok=True)
+    os.makedirs(episode_csv_dir, exist_ok=True)
+    os.makedirs(episode_png_dir, exist_ok=True)
     
     # ========================================================================
     # STEP 3: TRAINING LOOP
@@ -142,7 +152,7 @@ def train_agent():
     print("="*100)
     
     for episode in range(args.episodes):
-        # Pick a random trading day
+
         day_data = random.choice(all_daily_groups)
         env = SimplifiedStockTradingEnv(day_data, initial_balance=args.initial_balance)
         
@@ -150,124 +160,100 @@ def train_agent():
         total_reward = 0
         done = False
         
-        # Initialize episode logger (only if we're logging this episode)
         should_log = (args.log_episodes > 0) and ((episode + 1) % args.log_episodes == 0)
         if should_log:
             episode_logger = create_episode_logger()
         
         step_count = 0
         
-        # Episode loop
         while not done:
-            # Epsilon-greedy action selection
+
             was_random = False
             if random.random() < epsilon:
                 action = env.action_space.sample()
                 was_random = True
-                # Get Q-values even for random action (for logging)
                 with torch.no_grad():
                     state_t = torch.FloatTensor(state).unsqueeze(0)
                     q_values = policy_net(state_t).cpu().numpy()[0]
             else:
                 with torch.no_grad():
                     state_t = torch.FloatTensor(state).unsqueeze(0)
-                    q_values = policy_net(state_t)
-                    action = q_values.argmax().item()
-                    q_values = q_values.cpu().numpy()[0]
+                    q_tensor = policy_net(state_t)
+                    action = q_tensor.argmax().item()
+                    q_values = q_tensor.cpu().numpy()[0]
             
-            # Take action in environment
             next_state, reward, done, _, _ = env.step(action)
             
-            # Log step (only if logging this episode)
             if should_log:
                 log_step(episode_logger, episode + 1, step_count, env, state, 
                         action, q_values, epsilon, reward, was_random)
             
-            # Store experience in replay buffer
             replay_buffer.push(state, action, reward, next_state, done)
             
             state = next_state
             total_reward += reward
             step_count += 1
             
-            # Train the network
-            if len(replay_buffer) > 2000:  # Wait for buffer to fill a bit
-                # Sample batch from replay buffer
+            if len(replay_buffer) > 2000:
                 transitions = replay_buffer.sample(args.batch_size)
                 batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
-                
-                # Convert to tensors
+
                 batch_state = torch.FloatTensor(np.array(batch_state))
                 batch_action = torch.LongTensor(batch_action).unsqueeze(1)
                 batch_reward = torch.FloatTensor(batch_reward).unsqueeze(1)
                 batch_next_state = torch.FloatTensor(np.array(batch_next_state))
                 batch_done = torch.FloatTensor(batch_done).unsqueeze(1)
-                
-                # Compute current Q-values
+
                 curr_q = policy_net(batch_state).gather(1, batch_action)
-                
-                # Compute target Q-values
                 next_q = target_net(batch_next_state).max(1)[0].unsqueeze(1)
                 expected_q = batch_reward + args.gamma * next_q * (1 - batch_done)
-                
-                # Compute loss and update
+
                 loss = nn.MSELoss()(curr_q, expected_q)
-                
+
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
                 optimizer.step()
         
-        # Post-episode updates
         epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
-        
-        # Update target network periodically
+
         if episode % 10 == 0:
             target_net.load_state_dict(policy_net.state_dict())
-        
-        # Calculate episode metrics
+
         percent_return = ((env.net_worth - env.initial_balance) / env.initial_balance) * 100
-        
-        # Log episode metrics
+
         episode_metrics['Episode'].append(episode + 1)
         episode_metrics['Total_Reward'].append(total_reward)
         episode_metrics['Final_Net_Worth'].append(env.net_worth)
         episode_metrics['Percent_Return'].append(percent_return)
         episode_metrics['Number_of_Trades'].append(env.num_trades)
-        
-        # ====================================================================
-        # EPISODE LOGGING AND ANALYSIS
-        # ====================================================================
+
         if should_log:
-            log_df, log_path = save_episode_log(episode_logger, episode + 1)
-            
+            log_df, log_path = save_episode_log(
+                episode_logger, episode + 1, output_dir=episode_csv_dir)
+
             print(f"\n{'='*100}")
             print(f"Episode {episode+1} Complete - Detailed Analysis")
             print(f"{'='*100}")
             print(f"Saved detailed log to: {log_path}")
-            
-            # Print preview
+
             print_log_preview(log_df, num_rows=10)
-            
-            # Generate and save plot
-            plot_path = plot_episode_performance(log_df, episode + 1)
+
+            plot_path = plot_episode_performance(
+                log_df, episode + 1, output_dir=episode_png_dir)
             print(f"Saved performance plot to: {plot_path}")
-            
-            # Analyze decisions
+
             analyze_episode_decisions(log_df)
-        
-        # Record episode reward
+
         rewards_history.append(total_reward)
-        
-        # Print episode summary
+
         print(f"Episode {episode+1}: "
               f"Reward: {total_reward:.2f} | "
               f"Net Worth: ${env.net_worth:.2f} | "
               f"Return: {percent_return:.2f}% | "
               f"Trades: {env.num_trades} | "
               f"Epsilon: {epsilon:.2f}")
-        
-        # Generate intermediate training plot every 50 episodes
+
         if (episode + 1) % 50 == 0:
             plt.figure(figsize=(12, 6))
             plt.plot(rewards_history, linewidth=2)
@@ -276,40 +262,36 @@ def train_agent():
             plt.xlabel("Episode", fontsize=12)
             plt.ylabel("Total Reward", fontsize=12)
             plt.grid(True, alpha=0.3)
-            plt.savefig(f'training_rewards_ep{episode+1}.png', dpi=150, bbox_inches='tight')
+            plt.savefig(os.path.join(
+                rewards_dir, f'training_rewards_ep{episode+1}.png'),
+                dpi=150, bbox_inches='tight')
             plt.close()
             print(f"Saved intermediate plot: training_rewards_ep{episode+1}.png")
 
-    # ========================================================================
-    # STEP 4: SAVE OVERALL TRAINING RESULTS
-    # ========================================================================
     print("\n" + "="*100)
     print("TRAINING COMPLETE")
     print("="*100)
-    
-    # Save episode metrics to CSV
+
     metrics_df = pd.DataFrame(episode_metrics)
-    metrics_df.to_csv('episode_metrics.csv', index=False)
+    metrics_df.to_csv(os.path.join(base_dir, 'episode_metrics.csv'), index=False)
     print(f"\nSaved episode metrics to: episode_metrics.csv")
-    
-    # Generate final training plot
+
     plt.figure(figsize=(12, 6))
     plt.plot(rewards_history, linewidth=2)
     plt.title("Training Rewards Over All Episodes", fontsize=14, fontweight='bold')
     plt.xlabel("Episode", fontsize=12)
     plt.ylabel("Total Reward", fontsize=12)
     plt.grid(True, alpha=0.3)
-    plt.savefig('training_rewards_final.png', dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(
+        rewards_dir, 'training_rewards_final.png'),
+        dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Final training plot saved to: training_rewards_final.png")
-    
-    # Save model
-    torch.save(policy_net.state_dict(), 'trained_model_simplified.pth')
+
+    torch.save(policy_net.state_dict(),
+               os.path.join(base_dir, 'trained_model_simplified.pth'))
     print(f"Model saved to: trained_model_simplified.pth")
-    
-    # ========================================================================
-    # PRINT SUMMARY STATISTICS
-    # ========================================================================
+
     print("\n" + "="*100)
     print("TRAINING SUMMARY")
     print("="*100)

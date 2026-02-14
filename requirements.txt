@@ -12,7 +12,7 @@ matplotlib==3.10.8
 gymnasium==0.28.1
 
 # Deep learning framework (CPU-only by default; see below for CUDA)
-torch==2.9.1+cpu
+torch==2.9.1
 
 # Type hints and compatibility
 typing-extensions>=4.13.0
