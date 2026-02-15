@@ -95,5 +95,6 @@ pip-delete-this-directory.txt
 results/
 reports/
 
-processed_data/
-training_data/
+#processed_data/
+output_data/
+node_modules/
