@@ -98,3 +98,4 @@ reports/
 #processed_data/
 output_data/
 node_modules/
+credentials.json

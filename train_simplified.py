@@ -10,7 +10,7 @@ This script orchestrates the training process with a simplified environment:
 """
 import os
 from datetime import datetime
-
+from google_sheets_logger import GoogleSheetsLogger
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -123,6 +123,7 @@ def train_agent():
         'Number_of_Trades': []
     }
     
+
     print(f"Hyperparameters:")
     print(f"  Batch Size:     {args.batch_size}")
     print(f"  Learning Rate:  {args.learning_rate}")
@@ -135,7 +136,9 @@ def train_agent():
     # CREATE TRAINING DATA FOLDER STRUCTURE
     # ========================================================================
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base_dir = os.path.join("output_data", f"run_{timestamp}")
+    run_name = f"run_{timestamp}"
+
+    base_dir = os.path.join("output_data", run_name)
     rewards_dir = os.path.join(base_dir, "training_rewards")
     episode_csv_dir = os.path.join(base_dir, "episode_logs_csv")
     episode_png_dir = os.path.join(base_dir, "episode_logs_png")
@@ -143,6 +146,38 @@ def train_agent():
     os.makedirs(rewards_dir, exist_ok=True)
     os.makedirs(episode_csv_dir, exist_ok=True)
     os.makedirs(episode_png_dir, exist_ok=True)
+
+    # Create log file for this run (AFTER folders exist)
+    log_file_path = os.path.join(base_dir, "training_output.txt")
+    log_file = open(log_file_path, "w")
+
+    import sys
+    class Tee:
+        def __init__(self, *files):
+            self.files = files
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+        def flush(self):
+            for f in self.files:
+                f.flush()
+
+    sys.stdout = Tee(sys.stdout, log_file)
+
+
+
+    rewards_dir = os.path.join(base_dir, "training_rewards")
+    episode_csv_dir = os.path.join(base_dir, "episode_logs_csv")
+    episode_png_dir = os.path.join(base_dir, "episode_logs_png")
+
+    os.makedirs(rewards_dir, exist_ok=True)
+    os.makedirs(episode_csv_dir, exist_ok=True)
+    os.makedirs(episode_png_dir, exist_ok=True)
+
+    # 🔥 Initialize Google Sheets Logger (PER RUN)
+    gs_logger = GoogleSheetsLogger(run_name)
+
     
     # ========================================================================
     # STEP 3: TRAINING LOOP
@@ -228,6 +263,14 @@ def train_agent():
         episode_metrics['Percent_Return'].append(percent_return)
         episode_metrics['Number_of_Trades'].append(env.num_trades)
 
+        gs_logger.log_episode(
+            episode + 1,
+            total_reward,
+            env.net_worth,
+            percent_return,
+            env.num_trades
+        )
+
         if should_log:
             log_df, log_path = save_episode_log(
                 episode_logger, episode + 1, output_dir=episode_csv_dir)
@@ -273,8 +316,17 @@ def train_agent():
     print("="*100)
 
     metrics_df = pd.DataFrame(episode_metrics)
-    metrics_df.to_csv(os.path.join(base_dir, 'episode_metrics.csv'), index=False)
+
+    # Save single metrics file (used locally + mirrors Google Sheet)
+    metrics_path = os.path.join(base_dir, 'episode_metrics.csv')
+    metrics_df.to_csv(metrics_path, index=False)
+
     print(f"\nSaved episode metrics to: episode_metrics.csv")
+
+    # Create chart in Google Sheet
+    gs_logger.create_chart(len(episode_metrics['Episode']))
+
+
 
     plt.figure(figsize=(12, 6))
     plt.plot(rewards_history, linewidth=2)
@@ -306,6 +358,7 @@ def train_agent():
     print(f"Final Epsilon:          {epsilon:.4f}")
     print("="*100 + "\n")
 
+    log_file.close()
 
 if __name__ == "__main__":
     train_agent()
