@@ -55,9 +55,10 @@ class SimplifiedStockTradingEnv(gym.Env):
     - Exposure penalty (discourages over-concentration)
     """
     
-    def __init__(self, df, initial_balance=10000, window_size=20):
+    def __init__(self, df, stock_name="UNKNOWN", initial_balance=10000, window_size=20):
         super(SimplifiedStockTradingEnv, self).__init__()
         self.df = df.reset_index(drop=True)
+        self.stock_name = stock_name
         self.initial_balance = initial_balance
         self.window_size = window_size
         self.n_steps = len(df)

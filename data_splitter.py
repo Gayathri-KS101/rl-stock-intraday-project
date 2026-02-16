@@ -5,6 +5,7 @@ This module provides functionality to split intraday trading data into
 chronological train/test sets at the trading-day level, preventing temporal leakage.
 """
 
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -55,16 +56,16 @@ class ChronologicalDaySplitter:
         
         # Extract dates from each group (use first row's date)
         day_dates = []
-        for group in daily_groups:
+        for group, stock_name in daily_groups:
             if 'date' not in group.columns:
                 raise ValueError("Each DataFrame must have a 'date' column")
             
             # Get the date (not datetime) of this trading day
             first_date = pd.to_datetime(group['date'].iloc[0]).date()
-            day_dates.append(first_date)
+            day_dates.append((first_date, group, stock_name))
         
         # Create list of (date, dataframe) tuples
-        dated_groups = list(zip(day_dates, daily_groups))
+        dated_groups = day_dates
         
         # Sort chronologically by date
         dated_groups.sort(key=lambda x: x[0])
@@ -80,16 +81,20 @@ class ChronologicalDaySplitter:
             n_train = n_total - 1
         
         # Split chronologically
-        train_dated = dated_groups[:n_train]
-        test_dated = dated_groups[n_train:]
+        split_date = dated_groups[n_train][0]
+
+        train_dated = [x for x in dated_groups if x[0] < split_date]
+        test_dated = [x for x in dated_groups if x[0] >= split_date]
+
         
         # Extract just the DataFrames
-        train_groups = [df for _, df in train_dated]
-        test_groups = [df for _, df in test_dated]
+        train_groups = [(df, stock) for _, df, stock in train_dated]
+        test_groups = [(df, stock) for _, df, stock in test_dated]
         
         # Store split information
-        self.train_days = [date for date, _ in train_dated]
-        self.test_days = [date for date, _ in test_dated]
+        self.train_days = [date for date, _, _ in train_dated]
+        self.test_days = [date for date, _, _ in test_dated]
+
         
         self.split_info = {
             'total_days': n_total,
@@ -197,6 +202,8 @@ def load_and_split_data(
     
     # Load all files and extract daily groups
     for file_path in file_paths:
+        import os
+        stock_name = os.path.basename(file_path).replace("-minute.csv", "")
         df = load_data(file_path)
         if df is None:
             continue
@@ -211,7 +218,8 @@ def load_and_split_data(
             if len(group) > min_minutes_per_day
         ]
         
-        all_daily_groups.extend(daily_groups)
+        for group in daily_groups:
+            all_daily_groups.append((group, stock_name))
         
         print(f"Loaded {len(daily_groups)} valid days from: {file_path}")
     

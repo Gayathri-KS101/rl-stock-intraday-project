@@ -1,9 +1,0 @@
-{
-	"dependencies": {
-		"matplotlib": "^1.0.0",
-		"numpy": "^0.0.1",
-		"pandas": "^0.0.3",
-		"random": "^5.4.1",
-		"torch": "^0.2.7"
-	}
-}

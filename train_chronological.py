@@ -62,8 +62,13 @@ def evaluate_agent(policy_net, test_days, initial_balance, num_eval_episodes=Non
     print(f"EVALUATING ON TEST SET ({len(eval_days)} episodes)")
     print("="*100)
     
-    for i, day_data in enumerate(eval_days):
-        env = SimplifiedStockTradingEnv(day_data, initial_balance=initial_balance)
+    for i, (day_data, stock_name) in enumerate(eval_days):
+        env = SimplifiedStockTradingEnv(
+            day_data,
+            stock_name=stock_name,
+            initial_balance=initial_balance
+        )
+
         state, _ = env.reset()
         
         total_reward = 0
@@ -192,8 +197,12 @@ def train_agent():
     print("INITIALIZING SIMPLIFIED AGENT")
     print("="*100)
     
-    dummy_env = SimplifiedStockTradingEnv(train_days[0], 
-                                           initial_balance=args.initial_balance)
+    dummy_day_data, dummy_stock_name = train_days[0]
+    dummy_env = SimplifiedStockTradingEnv(
+        dummy_day_data,
+        stock_name=dummy_stock_name,
+        initial_balance=args.initial_balance
+    )
     input_dim = dummy_env.observation_space.shape[0]
     output_dim = dummy_env.action_space.n
     
@@ -260,8 +269,14 @@ def train_agent():
     for episode in range(args.episodes):
 
         # IMPORTANT: Sample only from training days
-        day_data = random.choice(train_days)
-        env = SimplifiedStockTradingEnv(day_data, initial_balance=args.initial_balance)
+        day_data, stock_name = random.choice(train_days)
+        env = SimplifiedStockTradingEnv(
+            day_data,
+            stock_name=stock_name,
+            initial_balance=args.initial_balance
+        )
+
+        print(f"Episode {episode+1} | Trading Stock: {stock_name}")
         
         state, _ = env.reset()
         total_reward = 0
@@ -431,7 +446,7 @@ def train_agent():
         policy_net,
         test_days,
         args.initial_balance,
-        num_eval_episodes=None  # Use all test days
+        num_eval_episodes=200  # Use all test days
     )
     
     print_evaluation_results(final_eval_metrics)
