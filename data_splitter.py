@@ -179,7 +179,7 @@ class ChronologicalDaySplitter:
 def load_and_split_data(
     file_paths: List[str],
     train_ratio: float = 0.7,
-    min_minutes_per_day: int = 60
+    min_minutes_per_day: int = 300
 ) -> Tuple[List[pd.DataFrame], List[pd.DataFrame], ChronologicalDaySplitter]:
     """
     Load CSV files, extract daily groups, and split chronologically.
@@ -207,6 +207,34 @@ def load_and_split_data(
         df = load_data(file_path)
         if df is None:
             continue
+
+        initial_len = len(df)
+        
+
+        # Remove missing price data
+        df = df.dropna(subset=['open', 'high', 'low', 'close'])
+        
+
+        removed = initial_len - len(df)
+        before_invalid = len(df)
+
+        df = df[
+          (df['high'] >= df['low']) &
+         (df['open'] >= df['low']) & (df['open'] <= df['high']) &
+         (df['close'] >= df['low']) & (df['close'] <= df['high'])
+        ]
+
+
+        invalid_removed = before_invalid - len(df)
+
+
+        # Remove invalid candles
+
+        if removed > 0:
+            print(f"Removed {removed} rows due to missing price values")
+
+
+        
         
         # Group by trading day
         df['day'] = df['date'].dt.date
@@ -215,7 +243,7 @@ def load_and_split_data(
         daily_groups = [
             group.reset_index(drop=True) 
             for _, group in df.groupby('day') 
-            if len(group) > min_minutes_per_day
+            if len(group) >= min_minutes_per_day
         ]
         
         for group in daily_groups:
@@ -242,33 +270,3 @@ def load_and_split_data(
         raise ValueError("Overlap detected between train and test sets!")
     
     return train_groups, test_groups, splitter
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    """
-    Example usage showing how to use the splitter.
-    """
-    import glob
-    
-    # Example: Load data from processed_data directory
-    data_dir = 'processed_data'
-    all_files = glob.glob(f'{data_dir}/*.csv')
-    
-    if not all_files:
-        print(f"No CSV files found in {data_dir}/")
-        print("This is a demo - the module is ready to use in your training script.")
-    else:
-        # Load and split
-        train_days, test_days, splitter = load_and_split_data(
-            all_files,
-            train_ratio=0.7,
-            min_minutes_per_day=60
-        )
-        
-        print(f"Ready for training with {len(train_days)} train days!")
-        print(f"Ready for testing with {len(test_days)} test days!")
-        
-        # Get split info
-        info = splitter.get_split_info()
-        print(f"\nSplit info dictionary: {info}")
