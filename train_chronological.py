@@ -316,7 +316,7 @@ def train_agent():
             total_reward += reward
             step_count += 1
             
-            if len(replay_buffer) > 2000:
+            if len(replay_buffer) > 500:
                 transitions = replay_buffer.sample(args.batch_size)
                 batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
 
@@ -339,7 +339,7 @@ def train_agent():
         
         epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
 
-        if episode % 10 == 0:
+        if episode % 5 == 0:
             target_net.load_state_dict(policy_net.state_dict())
 
         percent_return = ((env.net_worth - env.initial_balance) / env.initial_balance) * 100

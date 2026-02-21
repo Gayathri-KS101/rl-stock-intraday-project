@@ -70,7 +70,7 @@ class SimplifiedStockTradingEnv(gym.Env):
         # - Price window (normalized): window_size features
         # - Shares held (normalized): 1 feature
         # - Balance (normalized): 1 feature
-        total_features = window_size + 2
+        total_features = window_size + 4
         
         self.observation_space = spaces.Box(
             low=-np.inf, 
@@ -113,25 +113,34 @@ class SimplifiedStockTradingEnv(gym.Env):
         frame = self.df.iloc[self.current_step - self.window_size : self.current_step]
         current_row = self.df.iloc[self.current_step - 1]
         
-        # 1. Price History (Normalized relative to start of window)
+       # 1. Price History
         window_start_price = frame['close'].iloc[0]
         if window_start_price == 0:
-            window_start_price = 1e-8  # Safety
-        
+            window_start_price = 1e-8
+
         prices_norm = (frame['close'].values / window_start_price) - 1.0
-        
-        # 2. Shares Held (Normalized by theoretical max shares)
+
+        # 2. Shares Held
         max_possible_shares = self.initial_balance / current_row['close']
         shares_norm = self.shares_held / max_possible_shares if max_possible_shares > 0 else 0
-        
-        # 3. Balance (Normalized by initial balance)
+
+        # 3. Balance
         balance_norm = self.balance / self.initial_balance
-        
-        # Concatenate state
+
+        # 4. Momentum & Volatility
+        returns = frame['close'].pct_change().dropna().values
+        momentum = returns.mean() if len(returns) > 0 else 0.0
+        volatility = returns.std() if len(returns) > 0 else 0.0
+
+        momentum = np.clip(momentum, -1, 1)
+        volatility = np.clip(volatility, 0, 1)
+
         state = np.concatenate([
             prices_norm,
             [shares_norm],
-            [balance_norm]
+            [balance_norm],
+            [momentum],
+            [volatility]
         ])
         
         # Safety clip to avoid infs
@@ -199,19 +208,13 @@ class SimplifiedStockTradingEnv(gym.Env):
 
         # --- Reward Components ---
         
-        # 1. Profit component (normalized by initial balance)
+        # 1. Profit component
         profit = (new_net_worth - self.net_worth) / self.initial_balance
 
-        # 2. Drawdown penalty (discourages large losses from peak)
-        drawdown = (self.max_net_worth - new_net_worth) / self.max_net_worth
-        drawdown_penalty = -3.0 * drawdown
+        # 2. Small transaction penalty
+        trade_penalty = -0.0005 if action in [1, 2] else 0
 
-        # 3. Exposure penalty (discourages over-concentration in stock)
-        exposure = (self.shares_held * current_price) / new_net_worth if new_net_worth > 0 else 0
-        exposure_penalty = -0.2 * exposure
-
-        # 4. Final reward (clipped to prevent extreme values)
-        reward = profit + drawdown_penalty + exposure_penalty
+        reward = profit + trade_penalty
         reward = np.clip(reward, -5, 5)
         
         # Update net worth tracking
