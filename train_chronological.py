@@ -207,7 +207,8 @@ def train_agent():
     output_dim = dummy_env.action_space.n
     
     print(f"Input Dimension:  {input_dim} (price window + shares + balance)")
-    print(f"Output Dimension: {output_dim} (Hold, Buy 1, Sell 1)")
+    print(f"Output Dimension: {output_dim} (Cash, Invest)")
+
     print(f"Initial Balance:  ${args.initial_balance:,.2f}")
     print(f"Commission Rate:  {dummy_env.commission*100:.2f}%\n")
     
@@ -218,7 +219,8 @@ def train_agent():
     optimizer = optim.Adam(policy_net.parameters(), lr=args.learning_rate)
     replay_buffer = ReplayBuffer(50000)
     
-    epsilon = 1.0
+    epsilon = 0.3
+
     rewards_history = []
     
     episode_metrics = {
@@ -291,18 +293,29 @@ def train_agent():
         while not done:
 
             was_random = False
+            with torch.no_grad():
+                state_t = torch.FloatTensor(state).unsqueeze(0)
+                q_tensor = policy_net(state_t)
+                q_values = q_tensor.cpu().numpy()[0]
+
+            # Copy q_values for masking
+            masked_q = q_values.copy()
+
+            # --- ACTION MASKING ---
+            if env.shares_held == 0:
+                # Cannot Cash if already in Cash
+                masked_q[0] = -1e9
+            elif env.shares_held == 1:
+                # Cannot Invest if already invested
+                masked_q[1] = -1e9
+
+            # --- EPSILON-GREEDY ---
             if random.random() < epsilon:
-                action = env.action_space.sample()
+                valid_actions = np.where(masked_q > -1e8)[0]
+                action = np.random.choice(valid_actions)
                 was_random = True
-                with torch.no_grad():
-                    state_t = torch.FloatTensor(state).unsqueeze(0)
-                    q_values = policy_net(state_t).cpu().numpy()[0]
             else:
-                with torch.no_grad():
-                    state_t = torch.FloatTensor(state).unsqueeze(0)
-                    q_tensor = policy_net(state_t)
-                    action = q_tensor.argmax().item()
-                    q_values = q_tensor.cpu().numpy()[0]
+                action = np.argmax(masked_q)
             
             next_state, reward, done, _, _ = env.step(action)
             

@@ -62,26 +62,26 @@ class SimplifiedStockTradingEnv(gym.Env):
         self.initial_balance = initial_balance
         self.window_size = window_size
         self.n_steps = len(df)
-        
-        # Actions: 0=Hold, 1=Buy 1 share, 2=Sell 1 share
-        self.action_space = spaces.Discrete(3)
-        
+
+        # Actions: 0 = Full cash, 1 = Fully invested
+        self.action_space = spaces.Discrete(2)
+
         # State: Price History + Shares Held + Balance
         # - Price window (normalized): window_size features
         # - Shares held (normalized): 1 feature
         # - Balance (normalized): 1 feature
         total_features = window_size + 2
-        
+
         self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(total_features,), 
+            low=-np.inf,
+            high=np.inf,
+            shape=(total_features,),
             dtype=np.float32
         )
-        
+
         # Commission fee (0.2%)
-        self.commission = 0.002
-        
+        self.commission = 0
+
         # Track number of trades
         self.num_trades = 0
 
@@ -142,83 +142,52 @@ class SimplifiedStockTradingEnv(gym.Env):
     def step(self, action):
         """
         Execute one trading step.
-        
+
         Args:
-            action: 0=Hold, 1=Buy 1 share, 2=Sell 1 share
-            
-        Returns:
-            observation, reward, done, truncated, info
+            action: 0 = Stay fully in cash, 1 = Fully invested
         """
-        current_row = self.df.iloc[self.current_step]
-        current_price = current_row['close']
-        
+
+        current_price = self.df.iloc[self.current_step]['close']
         done = False
-        
-        # Force sell at end of episode
+
+        # --- Execute action at current_price ---
+        if action == 1 and self.shares_held == 0:
+            shares_to_buy = int(self.balance / (current_price * (1 + self.commission)))
+            if shares_to_buy > 0:
+                cost = shares_to_buy * current_price
+                fee = cost * self.commission
+                self.balance -= (cost + fee)
+                self.shares_held = shares_to_buy
+                self.cost_basis = current_price
+                self.num_trades += 1
+
+        elif action == 0 and self.shares_held > 0:
+            revenue = self.shares_held * current_price
+            fee = revenue * self.commission
+            self.balance += revenue - fee
+            self.shares_held = 0
+            self.cost_basis = 0
+            self.num_trades += 1
+
+        # --- Move to next timestep ---
+        self.current_step += 1
+
+        # Check terminal
         if self.current_step >= self.n_steps - 1:
             done = True
-            if self.shares_held > 0:
-                action = 2
-        
-        # Execute Action
-        if action == 1:  # Buy exactly 1 share
-            cost = current_price
-            fee = cost * self.commission
-            total_outflow = cost + fee
-            
-            if self.balance >= total_outflow:
-                self.balance -= total_outflow
-                
-                # Update average cost basis
-                prev_total_cost = self.shares_held * self.cost_basis
-                self.shares_held += 1
-                self.cost_basis = (prev_total_cost + cost) / self.shares_held
-                self.num_trades += 1
-        
-        elif action == 2:  # Sell exactly 1 share
-            if self.shares_held > 0:
-                revenue = current_price
-                fee = revenue * self.commission
-                net_revenue = revenue - fee
-                
-                self.balance += net_revenue
-                self.shares_held -= 1
-                if self.shares_held == 0:
-                    self.cost_basis = 0
-                
-                self.num_trades += 1
 
-        self.current_step += 1
-        
-        # Calculate new net worth
-        new_net_worth = self.balance + (self.shares_held * current_price)
+        # Use NEXT price for valuation
+        next_price = self.df.iloc[self.current_step]['close']
 
-        # Update max net worth FIRST (for drawdown calculation)
+        # --- Calculate new net worth using next price ---
+        new_net_worth = self.balance + (self.shares_held * next_price)
+
         if new_net_worth > self.max_net_worth:
             self.max_net_worth = new_net_worth
 
-        # --- Reward Components ---
-        
-        # 1. Profit component (normalized by initial balance)
-        profit = (new_net_worth - self.net_worth) / self.initial_balance
+        reward = (new_net_worth - self.net_worth) / self.initial_balance
 
-        # 2. Drawdown penalty (discourages large losses from peak)
-        drawdown = (self.max_net_worth - new_net_worth) / self.max_net_worth
-        drawdown_penalty = -3.0 * drawdown
-
-        # 3. Exposure penalty (discourages over-concentration in stock)
-        exposure = (self.shares_held * current_price) / new_net_worth if new_net_worth > 0 else 0
-        exposure_penalty = -0.2 * exposure
-
-        # 4. Final reward (clipped to prevent extreme values)
-        reward = profit + drawdown_penalty + exposure_penalty
-        reward = np.clip(reward, -5, 5)
-        
-        # Update net worth tracking
         self.net_worth = new_net_worth
-        if self.net_worth > self.max_net_worth:
-            self.max_net_worth = self.net_worth
-            
         self.history.append(self.net_worth)
-            
+
         return self._next_observation(), reward, done, False, {}
