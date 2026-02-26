@@ -6,6 +6,10 @@ This script fixes temporal leakage by:
 - Using only training days during training
 - Reserving test days for evaluation
 - Preventing any overlap between train and test sets
+
+Also implements decision interval to reduce over-trading:
+- Agent only makes new decisions every N minutes
+- Holds previous position in between decisions
 """
 import os
 from datetime import datetime
@@ -33,7 +37,7 @@ np.random.seed(42)
 random.seed(42)
 
 
-def evaluate_agent(policy_net, test_days, initial_balance, num_eval_episodes=None):
+def evaluate_agent(policy_net, test_days, initial_balance, num_eval_episodes=None, decision_interval=5):
     """
     Evaluate trained agent on test set.
     
@@ -42,6 +46,7 @@ def evaluate_agent(policy_net, test_days, initial_balance, num_eval_episodes=Non
         test_days: List of DataFrames for test days
         initial_balance: Initial trading balance
         num_eval_episodes: Number of episodes to evaluate (None = all test days)
+        decision_interval: How many steps between agent decisions
         
     Returns:
         Dictionary of evaluation metrics
@@ -73,17 +78,25 @@ def evaluate_agent(policy_net, test_days, initial_balance, num_eval_episodes=Non
         
         total_reward = 0
         done = False
-        
+        step_count = 0
+        previous_action = 0  # start in cash
+
         while not done:
-            # Use greedy policy (no exploration)
-            with torch.no_grad():
-                state_t = torch.FloatTensor(state).unsqueeze(0)
-                q_tensor = policy_net(state_t)
-                action = q_tensor.argmax().item()
+            # Only re-evaluate on decision intervals; otherwise hold previous action
+            if step_count % decision_interval == 0:
+                with torch.no_grad():
+                    state_t = torch.FloatTensor(state).unsqueeze(0)
+                    q_values = policy_net(state_t).cpu().numpy()[0]
+
+                action = np.argmax(q_values)
+                previous_action = action
+            else:
+                action = previous_action  # hold regime
             
             next_state, reward, done, _, _ = env.step(action)
             state = next_state
             total_reward += reward
+            step_count += 1
         
         # Calculate metrics
         percent_return = ((env.net_worth - env.initial_balance) / env.initial_balance) * 100
@@ -163,6 +176,8 @@ def train_agent():
                         help='Evaluate on test set every N episodes')
     parser.add_argument('--eval-episodes', type=int, default=20,
                         help='Number of test episodes to run during evaluation')
+    parser.add_argument('--decision-interval', type=int, default=5,
+                        help='Steps between agent decisions (1 = every step, 5 = every 5 minutes)')
     args = parser.parse_args()
 
     # ========================================================================
@@ -206,11 +221,11 @@ def train_agent():
     input_dim = dummy_env.observation_space.shape[0]
     output_dim = dummy_env.action_space.n
     
-    print(f"Input Dimension:  {input_dim} (price window + shares + balance)")
-    print(f"Output Dimension: {output_dim} (Cash, Invest)")
-
-    print(f"Initial Balance:  ${args.initial_balance:,.2f}")
-    print(f"Commission Rate:  {dummy_env.commission*100:.2f}%\n")
+    print(f"Input Dimension:    {input_dim} (price window + shares + balance)")
+    print(f"Output Dimension:   {output_dim} (Cash, Invest)")
+    print(f"Initial Balance:    ${args.initial_balance:,.2f}")
+    print(f"Commission Rate:    {dummy_env.commission*100:.2f}%")
+    print(f"Decision Interval:  Every {args.decision_interval} step(s)\n")
     
     policy_net = DQN(input_dim, output_dim)
     target_net = DQN(input_dim, output_dim)
@@ -234,12 +249,13 @@ def train_agent():
     eval_history = []
     
     print(f"Hyperparameters:")
-    print(f"  Batch Size:     {args.batch_size}")
-    print(f"  Learning Rate:  {args.learning_rate}")
-    print(f"  Gamma:          {args.gamma}")
-    print(f"  Epsilon Decay:  {args.epsilon_decay}")
-    print(f"  Epsilon Min:    {args.epsilon_min}")
-    print(f"  Buffer Size:    50000\n")
+    print(f"  Batch Size:        {args.batch_size}")
+    print(f"  Learning Rate:     {args.learning_rate}")
+    print(f"  Gamma:             {args.gamma}")
+    print(f"  Epsilon Decay:     {args.epsilon_decay}")
+    print(f"  Epsilon Min:       {args.epsilon_min}")
+    print(f"  Buffer Size:       50000")
+    print(f"  Decision Interval: {args.decision_interval} steps\n")
 
     # ========================================================================
     # CREATE TRAINING DATA FOLDER STRUCTURE
@@ -289,41 +305,69 @@ def train_agent():
             episode_logger = create_episode_logger()
         
         step_count = 0
+
+        # Track current action regime across steps
+        previous_action = 0  # start in cash
+
+        # Track state and accumulated reward at the start of each decision window
+        state_at_decision = state
+        accumulated_reward = 0.0
         
         while not done:
 
-            was_random = False
-            with torch.no_grad():
-                state_t = torch.FloatTensor(state).unsqueeze(0)
-                q_tensor = policy_net(state_t)
-                q_values = q_tensor.cpu().numpy()[0]
+            # Only re-evaluate the policy at decision interval boundaries
+            if step_count % args.decision_interval == 0:
+                was_random = False
+                with torch.no_grad():
+                    state_t = torch.FloatTensor(state).unsqueeze(0)
+                    q_values = policy_net(state_t).cpu().numpy()[0]
 
-            # Copy q_values for masking
-            masked_q = q_values.copy()
+                # --- EPSILON-GREEDY (no action masking) ---
+                # step() handles redundant actions gracefully:
+                # Invest while invested → no-op (natural hold)
+                # Cash while in cash   → no-op (natural hold)
+                if random.random() < epsilon:
+                    action = random.randint(0, 1)
+                    was_random = True
+                else:
+                    action = np.argmax(q_values)
 
-            # --- ACTION MASKING ---
-            if env.shares_held == 0:
-                # Cannot Cash if already in Cash
-                masked_q[0] = -1e9
-            elif env.shares_held == 1:
-                # Cannot Invest if already invested
-                masked_q[1] = -1e9
+                # Remember this decision for non-interval steps
+                previous_action = action
+                # Snapshot state and reset accumulator for this new decision window
+                state_at_decision = state
+                accumulated_reward = 0.0
 
-            # --- EPSILON-GREEDY ---
-            if random.random() < epsilon:
-                valid_actions = np.where(masked_q > -1e8)[0]
-                action = np.random.choice(valid_actions)
-                was_random = True
             else:
-                action = np.argmax(masked_q)
+                # Hold the previous regime — no new decision made
+                action = previous_action
+                was_random = False
+                # Recompute q_values for logging purposes only
+                with torch.no_grad():
+                    state_t = torch.FloatTensor(state).unsqueeze(0)
+                    q_values = policy_net(state_t).cpu().numpy()[0]
             
             next_state, reward, done, _, _ = env.step(action)
             
             if should_log:
                 log_step(episode_logger, episode + 1, step_count, env, state, 
                         action, q_values, epsilon, reward, was_random)
-            
-            replay_buffer.push(state, action, reward, next_state, done)
+
+            # Accumulate reward across every step in the hold window
+            accumulated_reward += reward
+
+            # Push to replay buffer at END of each decision window (or episode end),
+            # using the full accumulated reward for the window rather than just
+            # the 1-minute reward. This properly credits the decision.
+            is_last_step_of_window = (step_count + 1) % args.decision_interval == 0
+            if is_last_step_of_window or done:
+                replay_buffer.push(
+                    state_at_decision,  # state when decision was made
+                    previous_action,    # action that was decided
+                    accumulated_reward, # total reward earned during hold window
+                    next_state,         # state at end of window
+                    done
+                )
             
             state = next_state
             total_reward += reward
@@ -395,7 +439,8 @@ def train_agent():
                 policy_net, 
                 test_days, 
                 args.initial_balance,
-                num_eval_episodes=args.eval_episodes
+                num_eval_episodes=args.eval_episodes,
+                decision_interval=args.decision_interval
             )
             
             eval_metrics['episode'] = episode + 1
@@ -459,7 +504,8 @@ def train_agent():
         policy_net,
         test_days,
         args.initial_balance,
-        num_eval_episodes=200  # Use all test days
+        num_eval_episodes=200,
+        decision_interval=args.decision_interval
     )
     
     print_evaluation_results(final_eval_metrics)
@@ -481,6 +527,7 @@ def train_agent():
     
     print(f"\nTRAINING PERFORMANCE:")
     print(f"  Total Episodes:         {args.episodes}")
+    print(f"  Decision Interval:      Every {args.decision_interval} step(s)")
     print(f"  Average Reward:         {np.mean(rewards_history):.2f}")
     print(f"  Best Episode Reward:    {np.max(rewards_history):.2f}")
     print(f"  Worst Episode Reward:   {np.min(rewards_history):.2f}")
