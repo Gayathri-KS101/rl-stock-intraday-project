@@ -80,7 +80,7 @@ class SimplifiedStockTradingEnv(gym.Env):
         )
 
         # Commission fee (0.2%)
-        self.commission = 0.001
+        self.commission = 0.000
 
         # Track number of trades
         self.num_trades = 0
