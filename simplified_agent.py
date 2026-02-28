@@ -1,11 +1,5 @@
 """
-Simplified DQN Agent and Utilities Module
-
-This module contains:
-- DQN neural network architecture
-- Replay buffer implementation
-- Episode logging and analysis functions
-- Visualization utilities (simplified version)
+Simplified DQN Agent and Utilities Module with 21-bin logging
 """
 
 import pandas as pd
@@ -18,11 +12,10 @@ from collections import deque
 import random
 
 
-# --- DQN Network ---
 class DQN(nn.Module):
-    """Deep Q-Network for trading decisions."""
+    """Deep Q-Network for trading decisions with 21 outputs."""
     
-    def __init__(self, input_dim, output_dim=2):  # output_dim=2 for Cash/Invest
+    def __init__(self, input_dim, output_dim=21):  # Changed to 21
         super(DQN, self).__init__()
         self.fc1 = nn.Linear(input_dim, 128)
         self.fc2 = nn.Linear(128, 256)
@@ -43,11 +36,9 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=capacity)
     
     def push(self, state, action, reward, next_state, done):
-        """Add experience to buffer."""
         self.buffer.append((state, action, reward, next_state, done))
     
     def sample(self, batch_size):
-        """Sample random batch of experiences."""
         return random.sample(self.buffer, batch_size)
     
     def __len__(self):
@@ -55,20 +46,19 @@ class ReplayBuffer:
 
 
 # ============================================================================
-# LOGGING AND ANALYSIS UTILITIES
+# UPDATED LOGGING FOR 21-BIN ACTIONS
 # ============================================================================
 
 def create_episode_logger():
-    """Initialize an empty logger for episode steps."""
+    """Initialize logger for 21-bin actions."""
     return {
         'Episode': [],
         'Step': [],
         'DateTime': [],
         'Current_Price': [],
-        'Action': [],
-        'Action_Name': [],
-        'Q_Cash': [],
-        'Q_Invest': [],
+        'Action_Bin': [],        # 0-20
+        'Action_Value': [],       # -1.0 to +1.0
+        'Q_Values_Preview': [],   # First few Q-values
         'Chosen_Q_Value': [],
         'Decision_Reason': [],
         'Epsilon': [],
@@ -81,42 +71,30 @@ def create_episode_logger():
 
 def log_step(logger, episode, step, env, state, action, q_values, epsilon, reward, was_random):
     """
-    Log a single step's information to the episode logger.
-    
-    Args:
-        logger: Dictionary containing lists for each column
-        episode: Current episode number
-        step: Current step number
-        env: Trading environment
-        state: Current state (not used but available)
-        action: Action taken (0=Cash, 1=Invest)
-        q_values: Numpy array of Q-values [Q_Cash, Q_Invest]
-        epsilon: Current epsilon value
-        reward: Reward received
-        was_random: Boolean indicating if action was random exploration
+    Log a single step with 21-bin action.
     """
-    # Get current row from environment
     current_row = env.df.iloc[env.current_step - 1]
-
-    # Action mapping
-    action_names = {0: 'Cash', 1: 'Invest'}
+    
+    # Convert action to value
+    action_value = env.action_bins[action]
 
     # Decision reason
     if was_random:
-        decision_reason = "Exploration (Random)"
+        decision_reason = f"Exploration (Random) -> Bin {action}"
     else:
         max_q_idx = np.argmax(q_values)
-        decision_reason = f"Exploitation (Max Q: {action_names[max_q_idx]})"
+        decision_reason = f"Exploitation (Max Q: Bin {max_q_idx}) -> Bin {action}"
 
-    # Append to logger
+    # Format Q-values preview (first 5 values)
+    q_preview = ', '.join([f"{q:.4f}" for q in q_values[:5]]) + '...'
+
     logger['Episode'].append(episode)
     logger['Step'].append(step)
     logger['DateTime'].append(current_row['date'])
     logger['Current_Price'].append(current_row['close'])
-    logger['Action'].append(action)
-    logger['Action_Name'].append(action_names[action])
-    logger['Q_Cash'].append(q_values[0])
-    logger['Q_Invest'].append(q_values[1])
+    logger['Action_Bin'].append(action)
+    logger['Action_Value'].append(action_value)
+    logger['Q_Values_Preview'].append(q_preview)
     logger['Chosen_Q_Value'].append(q_values[action])
     logger['Decision_Reason'].append(decision_reason)
     logger['Epsilon'].append(epsilon)
@@ -127,7 +105,7 @@ def log_step(logger, episode, step, env, state, action, q_values, epsilon, rewar
 
 
 def save_episode_log(logger, episode, output_dir='episode_logs'):
-    """Save episode log to CSV and return DataFrame."""
+    """Save episode log to CSV."""
     os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(logger)
     filepath = f"{output_dir}/episode_{episode}_debug_log.csv"
@@ -136,95 +114,59 @@ def save_episode_log(logger, episode, output_dir='episode_logs'):
 
 
 def print_log_preview(df, num_rows=10):
-    """Print a formatted preview of the episode log."""
+    """Print preview of episode log."""
     print("\n" + "="*100)
     print("EPISODE LOG PREVIEW (First {} rows)".format(min(num_rows, len(df))))
     print("="*100)
 
-    # Select key columns for preview
-    preview_cols = ['Step', 'DateTime', 'Action_Name', 'Current_Price',
-                    'Q_Cash', 'Q_Invest', 'Decision_Reason',
+    preview_cols = ['Step', 'DateTime', 'Action_Value', 'Current_Price',
                     'Shares_Held', 'Net_Worth', 'Reward']
 
     preview_df = df[preview_cols].head(num_rows).copy()
 
-    # Format for better readability
     preview_df['Current_Price'] = preview_df['Current_Price'].apply(lambda x: f"${x:.2f}")
-    preview_df['Q_Cash']        = preview_df['Q_Cash'].apply(lambda x: f"{x:.4f}")
-    preview_df['Q_Invest']      = preview_df['Q_Invest'].apply(lambda x: f"{x:.4f}")
-    preview_df['Net_Worth']     = preview_df['Net_Worth'].apply(lambda x: f"${x:.2f}")
-    preview_df['Reward']        = preview_df['Reward'].apply(lambda x: f"{x:.6f}")
+    preview_df['Action_Value'] = preview_df['Action_Value'].apply(lambda x: f"{x:.3f}")
+    preview_df['Net_Worth'] = preview_df['Net_Worth'].apply(lambda x: f"${x:.2f}")
+    preview_df['Reward'] = preview_df['Reward'].apply(lambda x: f"{x:.6f}")
 
     print(preview_df.to_string(index=False))
     print("="*100 + "\n")
 
 
 def plot_episode_performance(df, episode, output_dir='episode_logs'):
-    """
-    Create visualization showing net worth curve with Cash/Invest markers.
-
-    Args:
-        df: Episode log DataFrame
-        episode: Episode number
-        output_dir: Directory to save plot
-    """
+    """Plot episode performance with position coloring."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
 
-    steps     = df['Step'].values
+    steps = df['Step'].values
     net_worth = df['Net_Worth'].values
+    actions = df['Action_Value'].values
 
-    # --- Plot 1: Net Worth with Cash/Invest markers ---
-    ax1.plot(steps, net_worth, 'b-', linewidth=2, label='Net Worth')
+    # Plot 1: Net Worth with position color
+    scatter = ax1.scatter(steps, net_worth, c=actions, cmap='RdYlGn', 
+                          s=30, alpha=0.7, vmin=-1, vmax=1)
+    ax1.plot(steps, net_worth, 'b-', alpha=0.3, linewidth=1)
 
-    # Mark Invest actions (green upward triangles)
-    invest_mask = df['Action'] == 1
-    if invest_mask.any():
-        invest_steps    = df.loc[invest_mask, 'Step'].values
-        invest_networth = df.loc[invest_mask, 'Net_Worth'].values
-        ax1.scatter(invest_steps, invest_networth, color='green', marker='^',
-                    s=100, label='Invest', zorder=5, edgecolors='black', linewidths=1.5)
-
-    # Mark Cash actions (red downward triangles)
-    cash_mask = df['Action'] == 0
-    if cash_mask.any():
-        cash_steps    = df.loc[cash_mask, 'Step'].values
-        cash_networth = df.loc[cash_mask, 'Net_Worth'].values
-        ax1.scatter(cash_steps, cash_networth, color='red', marker='v',
-                    s=100, label='Cash', zorder=5, edgecolors='black', linewidths=1.5)
-
-    # Initial balance reference line
     initial_balance = df['Net_Worth'].iloc[0]
     ax1.axhline(y=initial_balance, color='gray', linestyle='--',
                 linewidth=1, label=f'Initial Balance (${initial_balance:.2f})')
 
-    ax1.set_ylabel('Net Worth ($)', fontsize=12, fontweight='bold')
-    ax1.set_title(f'Episode {episode} - Trading Performance', fontsize=14, fontweight='bold')
-    ax1.legend(loc='best', fontsize=10)
+    ax1.set_ylabel('Net Worth ($)', fontsize=12)
+    ax1.set_title(f'Episode {episode} - Fake PPO Performance', fontsize=14)
+    ax1.legend(loc='best')
     ax1.grid(True, alpha=0.3)
 
-    # --- Plot 2: Price with Cash/Invest markers ---
+    # Plot 2: Price
     price = df['Current_Price'].values
     ax2.plot(steps, price, 'k-', linewidth=1.5, label='Price')
-
-    if invest_mask.any():
-        invest_prices = df.loc[invest_mask, 'Current_Price'].values
-        ax2.scatter(invest_steps, invest_prices, color='green', marker='^',
-                    s=80, alpha=0.7, zorder=5, label='Invest')
-
-    if cash_mask.any():
-        cash_prices = df.loc[cash_mask, 'Current_Price'].values
-        ax2.scatter(cash_steps, cash_prices, color='red', marker='v',
-                    s=80, alpha=0.7, zorder=5, label='Cash')
-
-    ax2.set_xlabel('Step', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('Price ($)', fontsize=12, fontweight='bold')
-    ax2.set_title('Price Action', fontsize=12, fontweight='bold')
-    ax2.legend(loc='best', fontsize=10)
+    ax2.set_xlabel('Step', fontsize=12)
+    ax2.set_ylabel('Price ($)', fontsize=12)
     ax2.grid(True, alpha=0.3)
+
+    cbar = plt.colorbar(scatter, ax=ax2, orientation='horizontal', pad=0.2)
+    cbar.set_label('Position (-1 Short to +1 Long)', fontsize=10)
 
     plt.tight_layout()
 
-    # Save plot
     os.makedirs(output_dir, exist_ok=True)
     filepath = f"{output_dir}/episode_{episode}_performance.png"
     plt.savefig(filepath, dpi=150, bbox_inches='tight')
@@ -234,77 +176,29 @@ def plot_episode_performance(df, episode, output_dir='episode_logs'):
 
 
 def analyze_episode_decisions(df):
-    """
-    Analyze and print decision statistics from episode log.
-
-    Args:
-        df: Episode log DataFrame
-    """
+    """Analyze episode decisions for 21-bin actions."""
     print("\n" + "="*100)
     print("EPISODE DECISION ANALYSIS")
     print("="*100)
 
-    # 1. Action Distribution
-    action_counts = df['Action_Name'].value_counts()
-    action_pcts   = (action_counts / len(df) * 100).round(2)
-
-    print("\n1. ACTION DISTRIBUTION:")
+    # Position Distribution
+    print("\n1. POSITION DISTRIBUTION:")
     print("-" * 50)
-    for action in ['Cash', 'Invest']:
-        count = action_counts.get(action, 0)
-        pct   = action_pcts.get(action, 0.0)
-        print(f"   {action:6s}: {count:4d} ({pct:5.2f}%)")
+    
+    short_pct = (df['Action_Value'] < -0.1).mean() * 100
+    cash_pct = ((df['Action_Value'] >= -0.1) & (df['Action_Value'] <= 0.1)).mean() * 100
+    long_pct = (df['Action_Value'] > 0.1).mean() * 100
+    
+    print(f"   Short (< -0.1):   {short_pct:6.2f}%")
+    print(f"   Cash (-0.1 to 0.1): {cash_pct:6.2f}%")
+    print(f"   Long (> 0.1):      {long_pct:6.2f}%")
+    print(f"   Avg Position:      {df['Action_Value'].mean():6.3f}")
 
-    # 2. Average Q-values per action taken
-    print("\n2. AVERAGE Q-VALUES PER ACTION TAKEN:")
+    # Performance summary
+    print("\n2. PERFORMANCE SUMMARY:")
     print("-" * 50)
-    for action_name, action_code in [('Cash', 0), ('Invest', 1)]:
-        action_df = df[df['Action'] == action_code]
-        if len(action_df) > 0:
-            avg_q_cash   = action_df['Q_Cash'].mean()
-            avg_q_invest = action_df['Q_Invest'].mean()
-            print(f"   When {action_name:6s}: Q_Cash={avg_q_cash:7.4f}, Q_Invest={avg_q_invest:7.4f}")
-        else:
-            print(f"   When {action_name:6s}: No actions taken")
-
-    # 3. Average reward per action
-    print("\n3. AVERAGE REWARD PER ACTION:")
-    print("-" * 50)
-    for action_name in ['Cash', 'Invest']:
-        action_df = df[df['Action_Name'] == action_name]
-        if len(action_df) > 0:
-            avg_reward   = action_df['Reward'].mean()
-            total_reward = action_df['Reward'].sum()
-            print(f"   {action_name:6s}: Avg={avg_reward:10.6f}, Total={total_reward:10.6f}")
-        else:
-            print(f"   {action_name:6s}: No actions taken")
-
-    # 4. Exploration vs Exploitation
-    print("\n4. EXPLORATION vs EXPLOITATION:")
-    print("-" * 50)
-    total             = len(df)
-    exploration_count = df['Decision_Reason'].str.contains('Exploration').sum()
-    exploitation_count = df['Decision_Reason'].str.contains('Exploitation').sum()
-    print(f"   Exploration (Random): {exploration_count:4d} ({exploration_count/total*100:5.2f}%)")
-    print(f"   Exploitation (Max Q): {exploitation_count:4d} ({exploitation_count/total*100:5.2f}%)")
-
-    # 5. Q-value statistics
-    print("\n5. Q-VALUE STATISTICS (Overall):")
-    print("-" * 50)
-    print(f"   Q_Cash   - Mean: {df['Q_Cash'].mean():7.4f}, Std: {df['Q_Cash'].std():7.4f}")
-    print(f"   Q_Invest - Mean: {df['Q_Invest'].mean():7.4f}, Std: {df['Q_Invest'].std():7.4f}")
-
-    # 6. Position switching frequency
-    print("\n6. POSITION SWITCHING:")
-    print("-" * 50)
-    switches = (df['Action'] != df['Action'].shift()).sum() - 1  # subtract 1 for the first step
-    print(f"   Total switches (Cash ↔ Invest): {max(switches, 0)}")
-
-    # 7. Performance summary
-    print("\n7. PERFORMANCE SUMMARY:")
-    print("-" * 50)
-    initial_nw   = df['Net_Worth'].iloc[0]
-    final_nw     = df['Net_Worth'].iloc[-1]
+    initial_nw = df['Net_Worth'].iloc[0]
+    final_nw = df['Net_Worth'].iloc[-1]
     total_return = ((final_nw - initial_nw) / initial_nw) * 100
     total_reward = df['Reward'].sum()
 
