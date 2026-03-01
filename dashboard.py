@@ -428,7 +428,7 @@ def render_dashboard() -> None:
     st.subheader("B — Live Equity Curve (Latest Episode)")
 
     if ep_log is not None:
-        st.plotly_chart(build_equity_curve(ep_log), use_container_width=True)
+        st.plotly_chart(build_equity_curve(ep_log), width="stretch")
     else:
         st.info("No episode logs found yet. Waiting for first logged episode…")
 
@@ -442,9 +442,12 @@ def render_dashboard() -> None:
         roll_vol = compute_rolling_volatility(rewards)
         sharpe   = compute_sharpe(rewards)
         n_total  = len(ep_log)
-        expl_pct = ep_log["Decision_Reason"].str.contains("Exploration").mean() * 100
-        avg_qc   = ep_log["Q_Cash"].mean()
-        avg_qi   = ep_log["Q_Invest"].mean()
+        if "Decision_Reason" in ep_log.columns:
+            expl_pct = ep_log["Decision_Reason"].str.contains("Exploration").mean() * 100
+        else:
+            expl_pct = 0.0
+        avg_qc = ep_log["Q_Cash"].mean() if "Q_Cash" in ep_log.columns else 0.0
+        avg_qi = ep_log["Q_Invest"].mean() if "Q_Invest" in ep_log.columns else 0.0
 
         rc1, rc2, rc3, rc4, rc5, rc6 = st.columns(6)
         with rc1:
@@ -462,7 +465,7 @@ def render_dashboard() -> None:
         with rc6:
             metric_card("Avg Q_Invest", f"{avg_qi:.4f}")
 
-        st.plotly_chart(build_q_value_plot(ep_log), use_container_width=True)
+        st.plotly_chart(build_q_value_plot(ep_log), width="stretch")
     else:
         st.info("Risk metrics available after first logged episode.")
 
@@ -474,11 +477,11 @@ def render_dashboard() -> None:
     if metrics_df is not None and len(metrics_df) >= 2:
         col_left, col_right = st.columns(2)
         with col_left:
-            st.plotly_chart(build_return_histogram(metrics_df), use_container_width=True)
+            st.plotly_chart(build_return_histogram(metrics_df), width="stretch")
         with col_right:
-            st.plotly_chart(build_trade_histogram(metrics_df), use_container_width=True)
+            st.plotly_chart(build_trade_histogram(metrics_df), width="stretch")
 
-        st.plotly_chart(build_reward_curve(metrics_df), use_container_width=True)
+        st.plotly_chart(build_reward_curve(metrics_df), width="stretch")
     else:
         st.info("Distributions available after at least 2 episodes complete.")
 
@@ -510,7 +513,7 @@ def render_dashboard() -> None:
             metric_card("Avg Trades", f"{row['avg_trades']:.1f}")
 
         if eval_df is not None and len(eval_df) >= 2:
-            st.plotly_chart(build_eval_timeline(eval_df), use_container_width=True)
+            st.plotly_chart(build_eval_timeline(eval_df), width="stretch")
     else:
         st.info("Evaluation data available after first evaluation checkpoint.")
 
