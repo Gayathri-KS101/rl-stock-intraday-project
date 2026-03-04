@@ -61,7 +61,7 @@ def _safe_read_csv(path: str) -> pd.DataFrame | None:
 
 def detect_latest_run(root: str = OUTPUT_ROOT) -> str | None:
     """Return the path of the most-recently-modified run folder."""
-    pattern = os.path.join(root, "run_*")
+    pattern = os.path.join(root, "*run_*")
     runs = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     return runs[0] if runs else None
 
@@ -73,7 +73,7 @@ def load_episode_metrics(run_dir: str) -> pd.DataFrame | None:
 
 def load_latest_episode_log(run_dir: str) -> pd.DataFrame | None:
     """Find and load the highest-numbered episode debug log."""
-    pattern = os.path.join(run_dir, "episode_logs_csv", "episode_*_debug_log.csv")
+    pattern = os.path.join(run_dir, "episode_*_debug_log.csv")
     files = sorted(glob.glob(pattern))
     if not files:
         return None
@@ -372,7 +372,7 @@ def render_dashboard() -> None:
         st.caption(f"Root: `{os.path.abspath(OUTPUT_ROOT)}`")
         st.divider()
         st.markdown("**Run:**")
-        all_runs = sorted(glob.glob(os.path.join(OUTPUT_ROOT, "run_*")),
+        all_runs = sorted(glob.glob(os.path.join(OUTPUT_ROOT, "*run_*")),
                           key=os.path.getmtime, reverse=True)
         selected_run = st.selectbox(
             "Select run", options=[os.path.basename(r) for r in all_runs],

@@ -77,6 +77,8 @@ def train_agent():
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_dir = os.path.join("output_data", f"a2c_run_{timestamp}")
+    log_dir = os.path.join(base_dir, "episode_logs_csv")
+    os.makedirs(log_dir, exist_ok=True)
     os.makedirs(base_dir, exist_ok=True)
 
     advanced_analytics = AdvancedAnalytics(base_dir)
@@ -207,7 +209,7 @@ def train_agent():
             log_df, filepath = save_episode_log(
                 episode_logger,
                 episode + 1,
-                output_dir=base_dir
+                output_dir=log_dir
             )
 
             print_log_preview(log_df)
