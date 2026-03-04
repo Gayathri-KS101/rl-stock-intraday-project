@@ -17,7 +17,27 @@ import os
 from collections import deque
 import random
 
+#---A2C---
+class ActorCritic(nn.Module):
+    def __init__(self, input_dim, action_dim):
+        super(ActorCritic, self).__init__()
 
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 256),
+            nn.ReLU(),
+        )
+
+        self.actor = nn.Linear(256, action_dim)
+        self.critic = nn.Linear(256, 1)
+
+    def forward(self, x):
+        shared = self.shared(x)
+        logits = self.actor(shared)
+        value = self.critic(shared)
+        return logits, value
+    
 # --- DQN Network ---
 class DQN(nn.Module):
     """Deep Q-Network for trading decisions."""

@@ -146,10 +146,10 @@ class SimplifiedStockTradingEnv(gym.Env):
         Args:
             action: 0 = Stay fully in cash, 1 = Fully invested
         """
-
+        old_net_worth = self.net_worth
         current_price = self.df.iloc[self.current_step]['close']
         done = False
-
+       
         # --- Execute action at current_price ---
         if action == 1 and self.shares_held == 0:
             shares_to_buy = int(self.balance / (current_price * (1 + self.commission)))
@@ -185,9 +185,21 @@ class SimplifiedStockTradingEnv(gym.Env):
         if new_net_worth > self.max_net_worth:
             self.max_net_worth = new_net_worth
 
-        reward = (new_net_worth - self.net_worth) / self.initial_balance
+        reward = (new_net_worth - old_net_worth) / old_net_worth
+        reward *= 100
 
         self.net_worth = new_net_worth
         self.history.append(self.net_worth)
 
-        return self._next_observation(), reward, done, False, {}
+        step_data = {
+            "step": self.current_step,
+            "price": next_price,
+            "action": action,
+            "balance": self.balance,
+            "shares_held": self.shares_held,
+            "net_worth": self.net_worth,
+            "reward": reward
+        }
+
+        return self._next_observation(), reward, done, False, step_data
+        

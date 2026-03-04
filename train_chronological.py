@@ -1,16 +1,10 @@
 """
-Training Script with Chronological Train/Test Split
-
-- Splits data chronologically at the trading-day level
-- Uses only training days during training
-- Reserves test days for evaluation
-- Prevents any overlap between train and test sets
-- Decision interval mechanism to reduce over-trading
+A2C Training Script with Chronological Train/Test Split
+Hybrid Version — Keeps Logging + Analytics
 """
 
 import os
 from datetime import datetime
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -18,212 +12,76 @@ import numpy as np
 import random
 import glob
 import argparse
-import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.pyplot as plt
 
-# Core training imports
-from simplified_environment import load_data, SimplifiedStockTradingEnv
-from simplified_agent import (DQN, ReplayBuffer, create_episode_logger, log_step,
-                               save_episode_log, print_log_preview, analyze_episode_decisions)
-from data_splitter import load_and_split_data, ChronologicalDaySplitter
-
-# Analytics — all plotting, summarizing, and saving delegated here
+from simplified_environment import SimplifiedStockTradingEnv
+from simplified_agent import (
+    ActorCritic,
+    create_episode_logger,
+    log_step,
+    save_episode_log,
+    print_log_preview,
+    analyze_episode_decisions,
+)
+from visualizations import plot_episode_results
+from data_splitter import load_and_split_data
 from advanced_analytics import AdvancedAnalytics
-
-# Line added to imports:
 from performance_commentary import generate_performance_summary
 
 
-# Set random seeds for reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
 
 
-def evaluate_agent(policy_net, test_days, initial_balance, num_eval_episodes=None, decision_interval=5):
-    """
-    Evaluate trained agent on test set.
-
-    Args:
-        policy_net: Trained DQN network
-        test_days: List of DataFrames for test days
-        initial_balance: Initial trading balance
-        num_eval_episodes: Number of episodes to evaluate (None = all test days)
-        decision_interval: How many steps between agent decisions
-
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    if num_eval_episodes is None:
-        eval_days = test_days
-    else:
-        eval_days = random.sample(test_days, min(num_eval_episodes, len(test_days)))
-
-    policy_net.eval()
-
-    eval_rewards = []
-    eval_returns = []
-    eval_trades = []
-    eval_net_worths = []
-
-    print("\n" + "="*100)
-    print(f"EVALUATING ON TEST SET ({len(eval_days)} episodes)")
-    print("="*100)
-
-    for i, (day_data, stock_name) in enumerate(eval_days):
-        env = SimplifiedStockTradingEnv(
-            day_data,
-            stock_name=stock_name,
-            initial_balance=initial_balance
-        )
-
-        state, _ = env.reset()
-
-        total_reward = 0
-        done = False
-        step_count = 0
-        previous_action = 0  # start in cash
-
-        while not done:
-            if step_count % decision_interval == 0:
-                with torch.no_grad():
-                    state_t = torch.FloatTensor(state).unsqueeze(0)
-                    q_values = policy_net(state_t).cpu().numpy()[0]
-
-                action = np.argmax(q_values)
-                previous_action = action
-            else:
-                action = previous_action
-
-            next_state, reward, done, _, _ = env.step(action)
-            state = next_state
-            total_reward += reward
-            step_count += 1
-
-        percent_return = ((env.net_worth - env.initial_balance) / env.initial_balance) * 100
-
-        eval_rewards.append(total_reward)
-        eval_returns.append(percent_return)
-        eval_trades.append(env.num_trades)
-        eval_net_worths.append(env.net_worth)
-
-        if (i + 1) % 10 == 0 or (i + 1) == len(eval_days):
-            print(f"Evaluated {i+1}/{len(eval_days)} episodes...")
-
-    eval_metrics = {
-        'num_episodes': len(eval_days),
-        'avg_reward': np.mean(eval_rewards),
-        'std_reward': np.std(eval_rewards),
-        'avg_return': np.mean(eval_returns),
-        'std_return': np.std(eval_returns),
-        'avg_trades': np.mean(eval_trades),
-        'win_rate': sum(1 for r in eval_returns if r > 0) / len(eval_returns) * 100,
-        'best_return': np.max(eval_returns),
-        'worst_return': np.min(eval_returns),
-        'final_avg_net_worth': np.mean(eval_net_worths)
-    }
-
-    return eval_metrics
-
-
-def print_evaluation_results(eval_metrics):
-    """Print formatted evaluation results to terminal."""
-    print("\n" + "="*100)
-    print("TEST SET EVALUATION RESULTS")
-    print("="*100)
-    print(f"\nEpisodes Evaluated:     {eval_metrics['num_episodes']}")
-    print(f"\nREWARD METRICS:")
-    print(f"  Average Reward:       {eval_metrics['avg_reward']:.2f} ± {eval_metrics['std_reward']:.2f}")
-    print(f"\nRETURN METRICS:")
-    print(f"  Average Return:       {eval_metrics['avg_return']:.2f}% ± {eval_metrics['std_return']:.2f}%")
-    print(f"  Best Return:          {eval_metrics['best_return']:.2f}%")
-    print(f"  Worst Return:         {eval_metrics['worst_return']:.2f}%")
-    print(f"  Win Rate:             {eval_metrics['win_rate']:.2f}%")
-    print(f"\nTRADING METRICS:")
-    print(f"  Avg Trades/Episode:   {eval_metrics['avg_trades']:.1f}")
-    print(f"  Avg Final Net Worth:  ${eval_metrics['final_avg_net_worth']:.2f}")
-    print("="*100 + "\n")
-
-
 def train_agent():
-    """Main training function with chronological train/test split."""
 
-    # ========================================================================
-    # ARGUMENTS
-    # ========================================================================
-    parser = argparse.ArgumentParser(description='Train simplified stock trading agent with proper data split.')
+    parser = argparse.ArgumentParser()
     parser.add_argument('--episodes', type=int, default=200)
     parser.add_argument('--log-episodes', type=int, default=10)
     parser.add_argument('--data-dir', type=str, default='processed_data')
     parser.add_argument('--initial-balance', type=float, default=10000)
     parser.add_argument('--train-ratio', type=float, default=0.7)
-    parser.add_argument('--min-minutes', type=int, default=60)
-    parser.add_argument('--batch-size', type=int, default=64)
-    parser.add_argument('--learning-rate', type=float, default=0.0005)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--epsilon-decay', type=float, default=0.995)
-    parser.add_argument('--epsilon-min', type=float, default=0.05)
-    parser.add_argument('--eval-frequency', type=int, default=50)
-    parser.add_argument('--eval-episodes', type=int, default=20)
+    parser.add_argument('--learning-rate', type=float, default=0.0001)
     parser.add_argument('--decision-interval', type=int, default=5)
     args = parser.parse_args()
 
-    # ========================================================================
-    # STEP 1: LOAD AND SPLIT DATA CHRONOLOGICALLY
-    # ========================================================================
-    print("="*100)
-    print("LOADING AND SPLITTING DATA")
-    print("="*100)
+    print("=" * 100)
+    print("LOADING DATA WITH CHRONOLOGICAL SPLIT")
+    print("=" * 100)
 
     all_files = glob.glob(f'{args.data_dir}/*.csv')
-    print(f"Found {len(all_files)} files in {args.data_dir}/")
-
-    if not all_files:
-        print(f"ERROR: No CSV files found in {args.data_dir}/")
-        return
 
     train_days, test_days, splitter = load_and_split_data(
         all_files,
-        train_ratio=args.train_ratio,
-        min_minutes_per_day=args.min_minutes
+        train_ratio=args.train_ratio
     )
 
-    print(f"✓ Training set: {len(train_days)} days")
-    print(f"✓ Test set: {len(test_days)} days")
-    print(f"✓ Zero temporal leakage guaranteed\n")
-
-    # ========================================================================
-    # STEP 2: INITIALIZE AGENT
-    # ========================================================================
-    print("="*100)
-    print("INITIALIZING SIMPLIFIED AGENT")
-    print("="*100)
-
-    dummy_day_data, dummy_stock_name = train_days[0]
+    dummy_day_data, dummy_stock = train_days[0]
     dummy_env = SimplifiedStockTradingEnv(
         dummy_day_data,
-        stock_name=dummy_stock_name,
+        stock_name=dummy_stock,
         initial_balance=args.initial_balance
     )
+
     input_dim = dummy_env.observation_space.shape[0]
-    output_dim = dummy_env.action_space.n
+    action_dim = dummy_env.action_space.n
 
-    print(f"Input Dimension:    {input_dim} (price window + shares + balance)")
-    print(f"Output Dimension:   {output_dim} (Cash, Invest)")
-    print(f"Initial Balance:    ${args.initial_balance:,.2f}")
-    print(f"Commission Rate:    {dummy_env.commission*100:.2f}%")
-    print(f"Decision Interval:  Every {args.decision_interval} step(s)\n")
+    print(f"Input Dim: {input_dim}")
+    print(f"Action Dim: {action_dim}")
 
-    policy_net = DQN(input_dim, output_dim)
-    target_net = DQN(input_dim, output_dim)
-    target_net.load_state_dict(policy_net.state_dict())
-
+    policy_net = ActorCritic(input_dim, action_dim)
     optimizer = optim.Adam(policy_net.parameters(), lr=args.learning_rate)
-    replay_buffer = ReplayBuffer(50000)
 
-    epsilon = 0.3
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_dir = os.path.join("output_data", f"a2c_run_{timestamp}")
+    os.makedirs(base_dir, exist_ok=True)
+
+    advanced_analytics = AdvancedAnalytics(base_dir)
+
     rewards_history = []
-
     episode_metrics = {
         'Episode': [],
         'Total_Reward': [],
@@ -232,46 +90,9 @@ def train_agent():
         'Number_of_Trades': []
     }
 
-    eval_history = []
-
-    print(f"Hyperparameters:")
-    print(f"  Batch Size:        {args.batch_size}")
-    print(f"  Learning Rate:     {args.learning_rate}")
-    print(f"  Gamma:             {args.gamma}")
-    print(f"  Epsilon Decay:     {args.epsilon_decay}")
-    print(f"  Epsilon Min:       {args.epsilon_min}")
-    print(f"  Buffer Size:       50000")
-    print(f"  Decision Interval: {args.decision_interval} steps\n")
-
-    # ========================================================================
-    # FOLDER STRUCTURE
-    # ========================================================================
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base_dir = os.path.join("output_data", f"run_{timestamp}")
-    rewards_dir = os.path.join(base_dir, "training_rewards")
-    episode_csv_dir = os.path.join(base_dir, "episode_logs_csv")
-    episode_png_dir = os.path.join(base_dir, "episode_logs_png")
-    eval_dir = os.path.join(base_dir, "evaluation_results")
-
-    os.makedirs(rewards_dir, exist_ok=True)
-    os.makedirs(episode_csv_dir, exist_ok=True)
-    os.makedirs(episode_png_dir, exist_ok=True)
-    os.makedirs(eval_dir, exist_ok=True)
-
-    # Save split information
-    split_info = splitter.get_split_info()
-    split_df = pd.DataFrame([split_info])
-    split_df.to_csv(os.path.join(base_dir, 'data_split_info.csv'), index=False)
-
-    # Initialise analytics — owns all summarising, plotting, and saving
-    advanced_analytics = AdvancedAnalytics(base_dir)
-
-    # ========================================================================
-    # STEP 3: TRAINING LOOP (TRAIN SET ONLY)
-    # ========================================================================
-    print("="*100)
-    print("STARTING TRAINING (TRAIN SET ONLY)")
-    print("="*100)
+    print("=" * 100)
+    print("STARTING A2C TRAINING")
+    print("=" * 100)
 
     for episode in range(args.episodes):
 
@@ -282,96 +103,91 @@ def train_agent():
             initial_balance=args.initial_balance
         )
 
-        print(f"Episode {episode+1} | Trading Stock: {stock_name}")
-
         state, _ = env.reset()
-        total_reward = 0
         done = False
+        total_reward = 0
+        step_count = 0
+        previous_action = 0
+        minute_log = []
 
         should_log = (args.log_episodes > 0) and ((episode + 1) % args.log_episodes == 0)
         if should_log:
             episode_logger = create_episode_logger()
 
-        step_count = 0
-        previous_action = 0
-        state_at_decision = state
-        accumulated_reward = 0.0
-
         while not done:
 
             if step_count % args.decision_interval == 0:
-                was_random = False
-                with torch.no_grad():
-                    state_t = torch.FloatTensor(state).unsqueeze(0)
-                    q_values = policy_net(state_t).cpu().numpy()[0]
 
-                if random.random() < epsilon:
-                    action = random.randint(0, 1)
-                    was_random = True
-                else:
-                    action = np.argmax(q_values)
+                state_t = torch.FloatTensor(state).unsqueeze(0)
+
+                logits, state_value = policy_net(state_t)
+                probs = torch.softmax(logits, dim=-1)
+                dist = torch.distributions.Categorical(probs)
+
+                action = dist.sample()
+                log_prob = dist.log_prob(action)
+                action = action.item()
 
                 previous_action = action
-                state_at_decision = state
-                accumulated_reward = 0.0
 
             else:
                 action = previous_action
-                was_random = False
                 with torch.no_grad():
                     state_t = torch.FloatTensor(state).unsqueeze(0)
-                    q_values = policy_net(state_t).cpu().numpy()[0]
+                    logits, _ = policy_net(state_t)
+                    probs = torch.softmax(logits, dim=-1)
 
-            next_state, reward, done, _, _ = env.step(action)
+            next_state, reward, done, _, info = env.step(action)
+            minute_log.append(info)
+            total_reward += reward
 
             if should_log:
-                log_step(episode_logger, episode + 1, step_count, env, state,
-                         action, q_values, epsilon, reward, was_random)
-
-            accumulated_reward += reward
-
-            is_last_step_of_window = (step_count + 1) % args.decision_interval == 0
-            if is_last_step_of_window or done:
-                replay_buffer.push(
-                    state_at_decision,
-                    previous_action,
-                    accumulated_reward,
-                    next_state,
-                    done
+                log_step(
+                    episode_logger,
+                    episode + 1,
+                    step_count,
+                    env,
+                    state,
+                    action,
+                    probs.detach().numpy()[0],
+                    0.0,
+                    reward,
+                    False
                 )
 
-            state = next_state
-            total_reward += reward
-            step_count += 1
+            if step_count % args.decision_interval == 0:
 
-            if len(replay_buffer) > 2000:
-                transitions = replay_buffer.sample(args.batch_size)
-                batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
+                next_state_t = torch.FloatTensor(next_state).unsqueeze(0)
+                _, next_value = policy_net(next_state_t)
 
-                batch_state      = torch.FloatTensor(np.array(batch_state))
-                batch_action     = torch.LongTensor(batch_action).unsqueeze(1)
-                batch_reward     = torch.FloatTensor(batch_reward).unsqueeze(1)
-                batch_next_state = torch.FloatTensor(np.array(batch_next_state))
-                batch_done       = torch.FloatTensor(batch_done).unsqueeze(1)
+                if done:
+                    target = torch.tensor([[reward]], dtype=torch.float32)
+                else:
+                    target = reward + args.gamma * next_value.detach()
 
-                curr_q     = policy_net(batch_state).gather(1, batch_action)
-                next_q     = target_net(batch_next_state).max(1)[0].unsqueeze(1)
-                expected_q = batch_reward + args.gamma * next_q * (1 - batch_done)
+                advantage = target - state_value
 
-                loss = nn.MSELoss()(curr_q, expected_q)
+                # Normalize advantage
+                #advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
+                actor_loss = -(log_prob * advantage.detach())
+                critic_loss = advantage.pow(2).mean()
+
+                entropy = dist.entropy().mean()
+
+                loss = actor_loss + 0.5 * critic_loss - 0.001 * entropy
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 1.0)
                 optimizer.step()
 
-        # --- Post-episode ---
-        epsilon = max(args.epsilon_min, epsilon * args.epsilon_decay)
-
-        if episode % 10 == 0:
-            target_net.load_state_dict(policy_net.state_dict())
+            state = next_state
+            step_count += 1
 
         percent_return = ((env.net_worth - args.initial_balance) / args.initial_balance) * 100
+        minute_df = pd.DataFrame(minute_log)
+        minute_df.to_csv(os.path.join(base_dir, f"episode_{episode+1}_minute_log.csv"), index=False)
 
         episode_metrics['Episode'].append(episode + 1)
         episode_metrics['Total_Reward'].append(total_reward)
@@ -379,151 +195,44 @@ def train_agent():
         episode_metrics['Percent_Return'].append(percent_return)
         episode_metrics['Number_of_Trades'].append(env.num_trades)
 
-        # Logging block — terminal previews + analytics saved to disk
-        if should_log:
-            log_df, log_path = save_episode_log(
-                episode_logger, episode + 1, output_dir=episode_csv_dir)
-
-            print(f"\n{'='*100}")
-            print(f"Episode {episode+1} Complete - Detailed Analysis")
-            print(f"{'='*100}")
-            print(f"Saved detailed log to: {log_path}")
-
-            print_log_preview(log_df, num_rows=10)
-            analyze_episode_decisions(log_df)
-
-            # All plotting + summary saving handled by analytics module
-            advanced_analytics.process_episode(log_df, episode + 1)
-
         rewards_history.append(total_reward)
 
         print(f"Episode {episode+1}: "
               f"Reward: {total_reward:.2f} | "
               f"Net Worth: ${env.net_worth:.2f} | "
               f"Return: {percent_return:.2f}% | "
-              f"Trades: {env.num_trades} | "
-              f"Epsilon: {epsilon:.2f}")
+              f"Trades: {env.num_trades}")
 
-        # Periodic evaluation
-        if (episode + 1) % args.eval_frequency == 0:
-            eval_metrics = evaluate_agent(
-                policy_net,
-                test_days,
-                args.initial_balance,
-                num_eval_episodes=args.eval_episodes,
-                decision_interval=args.decision_interval
+        if should_log:
+            log_df, filepath = save_episode_log(
+                episode_logger,
+                episode + 1,
+                output_dir=base_dir
             )
 
-            eval_metrics['episode'] = episode + 1
-            eval_history.append(eval_metrics)
+            print_log_preview(log_df)
+            analyze_episode_decisions(log_df)
+            advanced_analytics.process_episode(log_df, episode + 1)
 
-            print_evaluation_results(eval_metrics)
+            # 🔥 Generate Visualization
+            plot_episode_results(
+                filepath,
+                os.path.join(base_dir, f"episode_{episode+1}_visualization.png")
+            )
 
-            eval_df = pd.DataFrame(eval_history)
-            eval_df.to_csv(os.path.join(eval_dir, 'evaluation_history.csv'), index=False)
-
-        # Intermediate reward plot every 50 episodes
-        if (episode + 1) % 50 == 0:
-            plt.figure(figsize=(12, 6))
-            plt.plot(rewards_history, linewidth=2)
-            plt.title(f"Training Rewards (Episodes 1-{episode+1})",
-                      fontsize=14, fontweight='bold')
-            plt.xlabel("Episode", fontsize=12)
-            plt.ylabel("Total Reward", fontsize=12)
-            plt.grid(True, alpha=0.3)
-            plt.savefig(os.path.join(
-                rewards_dir, f'training_rewards_ep{episode+1}.png'),
-                dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"Saved intermediate plot: training_rewards_ep{episode+1}.png")
-
-    # ========================================================================
-    # POST-TRAINING
-    # ========================================================================
-    print("\n" + "="*100)
+    print("=" * 100)
     print("TRAINING COMPLETE")
-    print("="*100)
+    print("=" * 100)
+
+    torch.save(policy_net.state_dict(),
+               os.path.join(base_dir, 'trained_model_a2c.pth'))
 
     metrics_df = pd.DataFrame(episode_metrics)
     metrics_df.to_csv(os.path.join(base_dir, 'episode_metrics.csv'), index=False)
-    print(f"\nSaved episode metrics to: episode_metrics.csv")
 
-    # Final reward plot
-    plt.figure(figsize=(12, 6))
-    plt.plot(rewards_history, linewidth=2)
-    plt.title("Training Rewards Over All Episodes", fontsize=14, fontweight='bold')
-    plt.xlabel("Episode", fontsize=12)
-    plt.ylabel("Total Reward", fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(rewards_dir, 'training_rewards_final.png'),
-                dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Final training plot saved to: training_rewards_final.png")
-
-    # Save model
-    torch.save(policy_net.state_dict(),
-               os.path.join(base_dir, 'trained_model_simplified.pth'))
-    print(f"Model saved to: trained_model_simplified.pth")
-
-    # Advanced analytics — training and evaluation summaries saved to disk
     advanced_analytics.process_training(metrics_df)
-    advanced_analytics.process_evaluation(eval_history)
 
-    # ========================================================================
-    # FINAL EVALUATION ON FULL TEST SET
-    # ========================================================================
-    print("\n" + "="*100)
-    print("FINAL EVALUATION ON FULL TEST SET")
-    print("="*100)
-
-    final_eval_metrics = evaluate_agent(
-        policy_net,
-        test_days,
-        args.initial_balance,
-        num_eval_episodes=200,
-        decision_interval=args.decision_interval
-    )
-
-    print_evaluation_results(final_eval_metrics)
-
-    final_eval_df = pd.DataFrame([final_eval_metrics])
-    final_eval_df.to_csv(os.path.join(eval_dir, 'final_test_evaluation.csv'), index=False)
-
-    summary_text = generate_performance_summary(
-        final_eval_df, output_dir=base_dir, enable_voice=True,
-    )
-
-    # ========================================================================
-    # TRAINING SUMMARY (terminal only)
-    # ========================================================================
-    print("\n" + "="*100)
-    print("TRAINING SUMMARY")
-    print("="*100)
-    print(f"\nDATA SPLIT:")
-    print(f"  Training Days:          {len(train_days)}")
-    print(f"  Test Days:              {len(test_days)}")
-    print(f"  Temporal Leakage:       None (chronological split)")
-
-    print(f"\nTRAINING PERFORMANCE:")
-    print(f"  Total Episodes:         {args.episodes}")
-    print(f"  Decision Interval:      Every {args.decision_interval} step(s)")
-    print(f"  Average Reward:         {np.mean(rewards_history):.2f}")
-    print(f"  Best Episode Reward:    {np.max(rewards_history):.2f}")
-    print(f"  Worst Episode Reward:   {np.min(rewards_history):.2f}")
-    print(f"  Average Return:         {metrics_df['Percent_Return'].mean():.2f}%")
-    print(f"  Best Episode Return:    {metrics_df['Percent_Return'].max():.2f}%")
-    print(f"  Worst Episode Return:   {metrics_df['Percent_Return'].min():.2f}%")
-    print(f"  Average Trades/Episode: {metrics_df['Number_of_Trades'].mean():.1f}")
-    print(f"  Final Epsilon:          {epsilon:.4f}")
-
-    print(f"\nTEST SET PERFORMANCE:")
-    print(f"  Test Episodes:          {final_eval_metrics['num_episodes']}")
-    print(f"  Average Return:         {final_eval_metrics['avg_return']:.2f}%")
-    print(f"  Win Rate:               {final_eval_metrics['win_rate']:.2f}%")
-    print(f"  Best Return:            {final_eval_metrics['best_return']:.2f}%")
-    print(f"  Worst Return:           {final_eval_metrics['worst_return']:.2f}%")
-
-    print("="*100 + "\n")
+    print("A2C model saved successfully.")
 
 
 if __name__ == "__main__":
