@@ -1,0 +1,41 @@
+AGENT PERFORMANCE COMMENTARY
+Generated: 2026-03-01 17:40:55
+Evaluation Episodes: 4970
+========================================================================
+
+1. WIN RATE AND DIRECTIONAL ACCURACY
+------------------------------------------------------------------------
+The win rate of 53.6% across 4970 episodes is marginally above the random baseline of 50%. The edge is statistically weak and may not be robust under regime shifts or transaction cost sensitivity analysis.
+
+2. RETURN PROFILE
+------------------------------------------------------------------------
+The agent generates a modest positive average return of 0.31% per episode, with a return standard deviation of 0.00%. The resulting Sharpe-like ratio of 0.000 reflects limited compensation for variance taken.
+
+The best observed episode return was 14.51%, while the worst was -16.77%, yielding a return range of 31.28 percentage points. This wide range indicates high dispersion and inconsistent episode outcomes.
+
+3. VOLATILITY AND RISK EXPOSURE
+------------------------------------------------------------------------
+Return volatility is classified as low (std: 0.00%). Episode outcomes are tightly clustered around the mean, suggesting consistent execution with limited variance.
+
+The profit factor proxy — defined as the ratio of mean return to worst-case loss magnitude — stands at 0.019. A value below 1.0 signals that worst-case losses exceed average gains, which is unsustainable without structural improvement.
+
+4. DRAWDOWN AND TAIL-RISK ANALYSIS
+------------------------------------------------------------------------
+Worst observed episode return: -16.77%. Severe tail risk is observed. The worst-case return implies significant capital destruction risk. The reward structure and exploration policy require review before deployment.
+
+The downside exceeds the upside in absolute terms, indicating a negatively skewed return distribution. This profile requires attention before live deployment.
+
+5. TRADE AGGRESSIVENESS AND FREQUENCY
+------------------------------------------------------------------------
+Average trades per episode: 25.7 (classification: active). High trade frequency is observed, which increases transaction cost sensitivity. Performance metrics may deteriorate materially when realistic slippage and commission models are applied.
+
+6. STABILITY TREND ACROSS TRAINING
+------------------------------------------------------------------------
+Insufficient evaluation checkpoints to assess trend (minimum 3 required).
+
+7. OVERALL ROBUSTNESS VERDICT
+------------------------------------------------------------------------
+Composite robustness score: 3/10
+
+INSUFFICIENT — The current policy does not meet minimum performance thresholds. Reward design, data pipeline, or architecture review is recommended.
+========================================================================

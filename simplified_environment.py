@@ -186,6 +186,7 @@ class SimplifiedStockTradingEnv(gym.Env):
             self.max_net_worth = new_net_worth
 
         reward = (new_net_worth - self.net_worth) / self.initial_balance
+        reward = reward * 100
 
         self.net_worth = new_net_worth
         self.history.append(self.net_worth)
