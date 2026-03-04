@@ -1,0 +1,2 @@
+total_days,train_days,test_days,train_ratio_actual,train_first_date,train_last_date,test_first_date,test_last_date
+16401,11480,4970,0.6999573196756296,2024-04-29,2024-05-31,2024-06-03,2024-06-14

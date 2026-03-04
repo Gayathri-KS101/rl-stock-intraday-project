@@ -1,0 +1,41 @@
+AGENT PERFORMANCE COMMENTARY
+Generated: 2026-03-04 22:47:16
+Evaluation Episodes: 4970
+========================================================================
+
+1. WIN RATE AND DIRECTIONAL ACCURACY
+------------------------------------------------------------------------
+The agent's win rate of 0.0% across 4970 episodes falls below the break-even threshold. The policy is currently net-negative in directional accuracy, indicating insufficient learned signal or reward misalignment.
+
+2. RETURN PROFILE
+------------------------------------------------------------------------
+The agent generates a modest negative average return of 0.00% per episode, with a return standard deviation of 0.00%. The resulting Sharpe-like ratio of 0.000 reflects limited compensation for variance taken.
+
+The best observed episode return was 0.00%, while the worst was 0.00%, yielding a return range of 0.00 percentage points. This range is consistent with disciplined position management.
+
+3. VOLATILITY AND RISK EXPOSURE
+------------------------------------------------------------------------
+Return volatility is classified as low (std: 0.00%). Episode outcomes are tightly clustered around the mean, suggesting consistent execution with limited variance.
+
+The profit factor proxy — defined as the ratio of mean return to worst-case loss magnitude — stands at 0.000. A value below 1.0 signals that worst-case losses exceed average gains, which is unsustainable without structural improvement.
+
+4. DRAWDOWN AND TAIL-RISK ANALYSIS
+------------------------------------------------------------------------
+Worst observed episode return: 0.00%. Tail risk is contained; worst-case episodes remain within acceptable loss bounds.
+
+The downside exceeds the upside in absolute terms, indicating a negatively skewed return distribution. This profile requires attention before live deployment.
+
+5. TRADE AGGRESSIVENESS AND FREQUENCY
+------------------------------------------------------------------------
+Average trades per episode: 0.0 (classification: passive). The agent exhibits low trade frequency, consistent with a conservative positioning strategy. While this reduces transaction cost exposure, it may also limit the agent's ability to capitalize on short-lived intraday opportunities.
+
+6. STABILITY TREND ACROSS TRAINING
+------------------------------------------------------------------------
+Insufficient evaluation checkpoints to assess trend (minimum 3 required).
+
+7. OVERALL ROBUSTNESS VERDICT
+------------------------------------------------------------------------
+Composite robustness score: 2/10
+
+INSUFFICIENT — The current policy does not meet minimum performance thresholds. Reward design, data pipeline, or architecture review is recommended.
+========================================================================

@@ -21,6 +21,7 @@ from simplified_environment import SimplifiedStockTradingEnv
 from data_splitter import load_and_split_data
 from performance_commentary import generate_performance_summary
 
+
 # -------------------------------
 # PPO Environment Wrapper
 # -------------------------------
@@ -41,7 +42,6 @@ class PPOTradingEnv(SimplifiedStockTradingEnv):
         self.total_reward += reward
         self.num_trades = self.shares_held  # assume shares_held updates on buy/sell
 
-        # Add info for evaluation
         info.update({
             "net_worth": self.net_worth,
             "total_reward": self.total_reward,
@@ -110,7 +110,6 @@ def train_ppo():
     EPISODES = 200
     TRAIN_RATIO = 0.7
 
-    # Load CSV data
     all_files = glob.glob('processed_data/*.csv')
     if not all_files:
         print("ERROR: No CSV files found in processed_data/")
@@ -119,46 +118,100 @@ def train_ppo():
     train_days, test_days, splitter = load_and_split_data(all_files, train_ratio=TRAIN_RATIO)
     print(f"Training Days: {len(train_days)} | Test Days: {len(test_days)}")
 
-    # Output folders
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_dir = os.path.join("ppo_output", f"run_{timestamp}")
     os.makedirs(base_dir, exist_ok=True)
+
     rewards_dir = os.path.join(base_dir, "training_rewards")
     os.makedirs(rewards_dir, exist_ok=True)
+
     eval_dir = os.path.join(base_dir, "evaluation_results")
     os.makedirs(eval_dir, exist_ok=True)
 
-    # Save data split info
-    pd.DataFrame([splitter.get_split_info()]).to_csv(os.path.join(base_dir, 'data_split_info.csv'), index=False)
+    # Save split info
+    pd.DataFrame([splitter.get_split_info()]).to_csv(
+        os.path.join(base_dir, 'data_split_info.csv'),
+        index=False
+    )
 
-    # Initialize PPO with dummy env
+    # --------------------------
+    # Dashboard Logging File
+    # --------------------------
+    episode_metrics_file = os.path.join(base_dir, "episode_metrics.csv")
+
+    pd.DataFrame(columns=[
+        "episode",
+        "stock",
+        "reward",
+        "net_worth",
+        "return_pct",
+        "trades",
+        "win_rate"
+    ]).to_csv(episode_metrics_file, index=False)
+
     dummy_day, dummy_stock = train_days[0]
     vec_env = DummyVecEnv([lambda: PPOTradingEnv(dummy_day, dummy_stock, INITIAL_BALANCE)])
-    model = PPO("MlpPolicy", vec_env, learning_rate=0.0005, batch_size=64, n_steps=128, n_epochs=10, gamma=0.99, verbose=0)
+
+    model = PPO(
+        "MlpPolicy",
+        vec_env,
+        learning_rate=0.0005,
+        batch_size=64,
+        n_steps=128,
+        n_epochs=10,
+        gamma=0.99,
+        verbose=0
+    )
 
     rewards_history = []
     eval_history = []
 
     for ep in range(EPISODES):
-        # Sample a random training day
         day_data, stock_name = random.choice(train_days)
+
         env = PPOTradingEnv(day_data, stock_name, INITIAL_BALANCE)
         vec_env = DummyVecEnv([lambda: env])
         model.set_env(vec_env)
 
-        # Train the PPO agent on this day
-        model.learn(total_timesteps=len(day_data) * 20)  # enough steps to learn
+        model.learn(total_timesteps=len(day_data) * 20)
 
-        # Evaluate on same day to track progress
-        metrics = evaluate_ppo_agent(model, [(day_data, stock_name)], INITIAL_BALANCE, DECISION_INTERVAL)
+        metrics = evaluate_ppo_agent(
+            model,
+            [(day_data, stock_name)],
+            INITIAL_BALANCE,
+            DECISION_INTERVAL
+        )
+
         rewards_history.append(metrics['avg_reward'])
         eval_history.append(metrics)
 
-        print(f"Episode {ep+1} | Stock: {stock_name} | Reward: {metrics['avg_reward']:.2f} | "
-              f"Net Worth: ${metrics['avg_net_worth']:.2f} | Return: {metrics['avg_return']:.2f}% | "
-              f"Trades: {metrics['avg_trades']} | Win Rate: {metrics['win_rate']:.2f}%")
+        # --------------------------
+        # Log for Dashboard
+        # --------------------------
+        episode_row = {
+            "episode": ep + 1,
+            "stock": stock_name,
+            "reward": metrics['avg_reward'],
+            "net_worth": metrics['avg_net_worth'],
+            "return_pct": metrics['avg_return'],
+            "trades": metrics['avg_trades'],
+            "win_rate": metrics['win_rate']
+        }
 
-        # Save intermediate plot every 50 episodes
+        pd.DataFrame([episode_row]).to_csv(
+            episode_metrics_file,
+            mode='a',
+            header=False,
+            index=False
+        )
+
+        print(f"Episode {ep+1} | Stock: {stock_name} | "
+              f"Reward: {metrics['avg_reward']:.2f} | "
+              f"Net Worth: ${metrics['avg_net_worth']:.2f} | "
+              f"Return: {metrics['avg_return']:.2f}% | "
+              f"Trades: {metrics['avg_trades']} | "
+              f"Win Rate: {metrics['win_rate']:.2f}%")
+
         if (ep + 1) % 50 == 0:
             plt.figure(figsize=(12, 6))
             plt.plot(rewards_history, linewidth=2)
@@ -169,7 +222,7 @@ def train_ppo():
             plt.savefig(os.path.join(rewards_dir, f'training_rewards_ep{ep+1}.png'))
             plt.close()
 
-    # Final plot
+    # Final reward plot
     plt.figure(figsize=(12, 6))
     plt.plot(rewards_history, linewidth=2)
     plt.title("Training Rewards Over All Episodes")
@@ -179,13 +232,20 @@ def train_ppo():
     plt.savefig(os.path.join(rewards_dir, 'training_rewards_final.png'))
     plt.close()
 
-    # Save PPO model
     os.makedirs("ppo_models", exist_ok=True)
     model.save(os.path.join("ppo_models", "ppo_trading_model"))
 
-    # Final evaluation on test set
-    final_metrics = evaluate_ppo_agent(model, test_days, INITIAL_BALANCE, DECISION_INTERVAL)
-    pd.DataFrame([final_metrics]).to_csv(os.path.join(eval_dir, 'final_test_evaluation.csv'), index=False)
+    final_metrics = evaluate_ppo_agent(
+        model,
+        test_days,
+        INITIAL_BALANCE,
+        DECISION_INTERVAL
+    )
+
+    pd.DataFrame([final_metrics]).to_csv(
+        os.path.join(eval_dir, 'final_test_evaluation.csv'),
+        index=False
+    )
 
     print("\nFinal Evaluation on Test Set:")
     print(f"Avg Reward: {final_metrics['avg_reward']:.2f} | "
@@ -196,7 +256,11 @@ def train_ppo():
           f"Best Return: {final_metrics['best_return']:.2f}% | "
           f"Worst Return: {final_metrics['worst_return']:.2f}%")
 
-    generate_performance_summary(pd.DataFrame([final_metrics]), output_dir=base_dir, enable_voice=False)
+    generate_performance_summary(
+        pd.DataFrame([final_metrics]),
+        output_dir=base_dir,
+        enable_voice=False
+    )
 
 
 if __name__ == "__main__":
