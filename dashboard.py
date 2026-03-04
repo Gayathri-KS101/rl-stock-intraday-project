@@ -533,7 +533,7 @@ def render_dashboard() -> None:
     st.subheader("B — Live Equity Curve (Latest Episode)")
 
     if ep_log is not None:
-        st.plotly_chart(build_equity_curve(ep_log), use_container_width=True)
+        st.plotly_chart(build_equity_curve(ep_log), width="stretch")
     else:
         st.info("No episode logs found yet. Waiting for first logged episode…")
 
@@ -632,7 +632,7 @@ def render_dashboard() -> None:
 
         # Show Q-value plot if available (works for both old and new formats)
         if "Q_Cash" in ep_log.columns or "Chosen_Q_Value" in ep_log.columns:
-            st.plotly_chart(build_q_value_plot(ep_log), use_container_width=True)
+            st.plotly_chart(build_q_value_plot(ep_log), width="stretch")
     else:
         st.info("Risk metrics available after first logged episode.")
 
@@ -644,11 +644,11 @@ def render_dashboard() -> None:
     if metrics_df is not None and len(metrics_df) >= 2:
         col_left, col_right = st.columns(2)
         with col_left:
-            st.plotly_chart(build_return_histogram(metrics_df), use_container_width=True)
+            st.plotly_chart(build_return_histogram(metrics_df), width="stretch")
         with col_right:
-            st.plotly_chart(build_trade_histogram(metrics_df), use_container_width=True)
+            st.plotly_chart(build_trade_histogram(metrics_df), width="stretch")
 
-        st.plotly_chart(build_reward_curve(metrics_df), use_container_width=True)
+        st.plotly_chart(build_reward_curve(metrics_df), width="stretch")
     else:
         st.info("Distributions available after at least 2 episodes complete.")
 
@@ -680,7 +680,7 @@ def render_dashboard() -> None:
             metric_card("Avg Trades", f"{row['avg_trades']:.1f}")
 
         if eval_df is not None and len(eval_df) >= 2:
-            st.plotly_chart(build_eval_timeline(eval_df), use_container_width=True)
+            st.plotly_chart(build_eval_timeline(eval_df), width="stretch")
     else:
         st.info("Evaluation data available after first evaluation checkpoint.")
 
