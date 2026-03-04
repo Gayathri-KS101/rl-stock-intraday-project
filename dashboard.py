@@ -1,0 +1,700 @@
+"""
+Live Training Dashboard
+=======================
+Reads training artifacts from disk and renders a live view.
+Runs completely independently of the training process.
+
+Usage:
+    streamlit run dashboard.py
+
+Auto-detects the latest run under output_data/ and refreshes every 2 seconds.
+Safe against partially-written CSV files at all times.
+"""
+
+import os
+import glob
+import time
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+# ============================================================================
+# PAGE CONFIG — must be first Streamlit call
+# ============================================================================
+st.set_page_config(
+    page_title="DQN Trading — Live Dashboard",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+OUTPUT_ROOT = "output_data"
+REFRESH_INTERVAL_SEC = 2
+
+COLOUR_BUY     = "#00c853"
+COLOUR_SELL    = "#ff1744"
+COLOUR_HOLD    = "#ffa726"
+COLOUR_NET_WORTH = "#1565c0"
+COLOUR_PRICE   = "#424242"
+COLOUR_DRAW    = "rgba(255,23,68,0.15)"
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def _categorize_action(action_value: float) -> str:
+    """
+    Categorize continuous action values to position types.
+    -1.0 to -0.1  : Sell
+     -0.1 to 0.1  : Hold
+     0.1 to 1.0   : Buy
+    """
+    if action_value < -0.1:
+        return "sell"
+    elif action_value > 0.1:
+        return "buy"
+    else:
+        return "hold"
+
+
+def _get_action_value_column(ep_log: pd.DataFrame) -> str:
+    """Detect which action value column to use (new vs old format)."""
+    if "Action_Value" in ep_log.columns:
+        return "Action_Value"
+    elif "Action" in ep_log.columns:
+        # Old format: convert binary action to continuous
+        return "Action"
+    else:
+        raise ValueError("Neither Action_Value nor Action column found")
+
+
+def _format_action_text(action_value: float) -> str:
+    """
+    Format action value as human-readable text.
+    E.g., 0.7 -> "BUY 70%", -0.5 -> "SELL 50%", 0.0 -> "HOLD"
+    """
+    if action_value < -0.1:
+        percentage = int(abs(action_value) * 100)
+        return f"SELL {percentage}%"
+    elif action_value > 0.1:
+        percentage = int(action_value * 100)
+        return f"BUY {percentage}%"
+    else:
+        return "HOLD"
+
+
+def _extract_q_values(q_str: str) -> dict:
+    """
+    Extract Q-values from Q_Values_Preview string.
+    Format: "7.4772, 7.4948, 7.5023, 7.4962"
+    Returns dict with keys like Q_0, Q_1, etc.
+    """
+    try:
+        if pd.isna(q_str) or q_str == "":
+            return {}
+        values = [float(v.strip()) for v in str(q_str).split(",")]
+        return {f"Q_{i}": v for i, v in enumerate(values)}
+    except:
+        return {}
+
+# ============================================================================
+# DISK HELPERS — all I/O is safe against partial writes
+# ============================================================================
+
+def _safe_read_csv(path: str) -> pd.DataFrame | None:
+    """Read CSV; return None on any I/O or parse error."""
+    try:
+        df = pd.read_csv(path)
+        if df.empty:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def detect_latest_run(root: str = OUTPUT_ROOT) -> str | None:
+    """Return the path of the most-recently-modified run folder (including fake_ppo_run_*)."""
+    # Look for both regular runs and PPO runs
+    pattern1 = os.path.join(root, "run_*")
+    pattern2 = os.path.join(root, "*ppo_run_*")
+    
+    runs = sorted(
+        glob.glob(pattern1) + glob.glob(pattern2), 
+        key=os.path.getmtime, 
+        reverse=True
+    )
+    return runs[0] if runs else None
+
+
+def load_episode_metrics(run_dir: str) -> pd.DataFrame | None:
+    path = os.path.join(run_dir, "episode_metrics.csv")
+    return _safe_read_csv(path)
+
+
+def load_latest_episode_log(run_dir: str) -> pd.DataFrame | None:
+    """Find and load the highest-numbered episode debug log."""
+    pattern = os.path.join(run_dir, "episode_logs_csv", "episode_*_debug_log.csv")
+    files = sorted(glob.glob(pattern))
+    if not files:
+        return None
+    return _safe_read_csv(files[-1])
+
+
+def load_evaluation_history(run_dir: str) -> pd.DataFrame | None:
+    path = os.path.join(run_dir, "evaluation_results", "evaluation_history.csv")
+    return _safe_read_csv(path)
+
+
+def load_final_eval(run_dir: str) -> pd.DataFrame | None:
+    path = os.path.join(run_dir, "evaluation_results", "final_test_evaluation.csv")
+    return _safe_read_csv(path)
+
+
+# ============================================================================
+# METRIC COMPUTATIONS — stateless, operate on DataFrames
+# ============================================================================
+
+def compute_max_drawdown(net_worth: np.ndarray) -> float:
+    if len(net_worth) == 0:
+        return 0.0
+    peak = np.maximum.accumulate(net_worth)
+    dd = (net_worth - peak) / np.where(peak == 0, 1, peak)
+    return float(dd.min()) * 100  # as %
+
+
+def compute_rolling_volatility(rewards: pd.Series, window: int = 20) -> float:
+    if len(rewards) < 2:
+        return 0.0
+    return float(rewards.rolling(window, min_periods=2).std().iloc[-1])
+
+
+def compute_sharpe(rewards: pd.Series) -> float:
+    if len(rewards) < 2:
+        return 0.0
+    std = rewards.std()
+    return float(rewards.mean() / std) if std > 1e-10 else 0.0
+
+
+# ============================================================================
+# PLOT BUILDERS — all return Plotly figures
+# ============================================================================
+
+def build_equity_curve(ep_log: pd.DataFrame) -> go.Figure:
+    steps     = ep_log["Step"].values
+    net_worth = ep_log["Net_Worth"].values
+    price     = ep_log["Current_Price"].values
+    
+    # Handle both old and new formats
+    action_col = _get_action_value_column(ep_log)
+    if action_col == "Action_Value":
+        categorized = ep_log["Action_Value"].apply(_categorize_action)
+    else:
+        # Old format: 0 = Cash/Hold, 1 = Invest/Buy
+        categorized = ep_log["Action"].apply(lambda x: "buy" if x == 1 else "hold")
+
+    peak = np.maximum.accumulate(net_worth)
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.65, 0.35],
+        vertical_spacing=0.06,
+        subplot_titles=("Net Worth + Drawdown", "Price Action"),
+    )
+
+    # Drawdown fill
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([steps, steps[::-1]]),
+        y=np.concatenate([peak, net_worth[::-1]]),
+        fill="toself",
+        fillcolor=COLOUR_DRAW,
+        line=dict(width=0),
+        name="Drawdown",
+        showlegend=True,
+    ), row=1, col=1)
+
+    # Net worth line
+    fig.add_trace(go.Scatter(
+        x=steps, y=net_worth,
+        line=dict(color=COLOUR_NET_WORTH, width=2),
+        name="Net Worth",
+    ), row=1, col=1)
+
+    # Buy markers
+    buy_mask = categorized == "buy"
+    if buy_mask.any():
+        fig.add_trace(go.Scatter(
+            x=ep_log.loc[buy_mask, "Step"],
+            y=ep_log.loc[buy_mask, "Net_Worth"],
+            mode="markers",
+            marker=dict(symbol="triangle-up", color=COLOUR_BUY, size=7, line=dict(width=0.5, color="black")),
+            name="Buy",
+        ), row=1, col=1)
+
+    # Sell markers
+    sell_mask = categorized == "sell"
+    if sell_mask.any():
+        fig.add_trace(go.Scatter(
+            x=ep_log.loc[sell_mask, "Step"],
+            y=ep_log.loc[sell_mask, "Net_Worth"],
+            mode="markers",
+            marker=dict(symbol="triangle-down", color=COLOUR_SELL, size=7, line=dict(width=0.5, color="black")),
+            name="Sell",
+        ), row=1, col=1)
+
+    # Hold markers
+    hold_mask = categorized == "hold"
+    if hold_mask.any():
+        fig.add_trace(go.Scatter(
+            x=ep_log.loc[hold_mask, "Step"],
+            y=ep_log.loc[hold_mask, "Net_Worth"],
+            mode="markers",
+            marker=dict(symbol="circle", color=COLOUR_HOLD, size=5, line=dict(width=0.5, color="black")),
+            name="Hold",
+        ), row=1, col=1)
+
+    # Initial balance line
+    fig.add_hline(y=float(net_worth[0]), line_dash="dot", line_color="gray",
+                  annotation_text="Initial", row=1, col=1)
+
+    # Price
+    fig.add_trace(go.Scatter(
+        x=steps, y=price,
+        line=dict(color=COLOUR_PRICE, width=1.5),
+        name="Price",
+    ), row=2, col=1)
+
+    fig.update_layout(
+        height=480,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h", y=1.08),
+        hovermode="x unified",
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="#fafafa"),
+    )
+    fig.update_xaxes(gridcolor="#1e2130", zeroline=False)
+    fig.update_yaxes(gridcolor="#1e2130", zeroline=False)
+    return fig
+
+
+def build_reward_curve(metrics_df: pd.DataFrame) -> go.Figure:
+    episodes = metrics_df["Episode"].values
+    rewards  = metrics_df["Total_Reward"].values
+    rolling  = pd.Series(rewards).rolling(20, min_periods=1).mean().values
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=episodes, y=rewards,
+        line=dict(color="#546e7a", width=1),
+        opacity=0.5,
+        name="Raw Reward",
+    ))
+    fig.add_trace(go.Scatter(
+        x=episodes, y=rolling,
+        line=dict(color="#ffa726", width=2.5),
+        name="20-ep MA",
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig.update_layout(
+        title="Training Reward Curve",
+        height=280,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h"),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="#fafafa"),
+    )
+    fig.update_xaxes(title="Episode", gridcolor="#1e2130")
+    fig.update_yaxes(title="Reward", gridcolor="#1e2130")
+    return fig
+
+
+def build_return_histogram(metrics_df: pd.DataFrame) -> go.Figure:
+    returns = metrics_df["Percent_Return"].values
+    colours = [COLOUR_BUY if r >= 0 else COLOUR_SELL for r in returns]
+
+    fig = go.Figure(go.Histogram(
+        x=returns,
+        nbinsx=40,
+        marker_color="#42a5f5",
+        marker_line=dict(color="#1565c0", width=0.5),
+        opacity=0.85,
+    ))
+    fig.add_vline(x=0, line_dash="dash", line_color="gray")
+    fig.add_vline(x=float(np.mean(returns)), line_dash="dot", line_color="#ffa726",
+                  annotation_text=f"μ={np.mean(returns):.2f}%",
+                  annotation_position="top right")
+    fig.update_layout(
+        title="Return Distribution",
+        height=260,
+        margin=dict(l=10, r=10, t=40, b=10),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="#fafafa"),
+    )
+    fig.update_xaxes(title="Return (%)", gridcolor="#1e2130")
+    fig.update_yaxes(title="Count", gridcolor="#1e2130")
+    return fig
+
+
+def build_trade_histogram(metrics_df: pd.DataFrame) -> go.Figure:
+    trades = metrics_df["Number_of_Trades"].values
+    fig = go.Figure(go.Histogram(
+        x=trades,
+        nbinsx=30,
+        marker_color="#ab47bc",
+        marker_line=dict(color="#7b1fa2", width=0.5),
+        opacity=0.85,
+    ))
+    fig.add_vline(x=float(np.mean(trades)), line_dash="dot", line_color="#ffa726",
+                  annotation_text=f"μ={np.mean(trades):.1f}",
+                  annotation_position="top right")
+    fig.update_layout(
+        title="Trade Count Distribution",
+        height=260,
+        margin=dict(l=10, r=10, t=40, b=10),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="#fafafa"),
+    )
+    fig.update_xaxes(title="Trades / Episode", gridcolor="#1e2130")
+    fig.update_yaxes(title="Count", gridcolor="#1e2130")
+    return fig
+
+
+def build_eval_timeline(eval_df: pd.DataFrame) -> go.Figure:
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("Avg Return per Checkpoint", "Win Rate per Checkpoint"),
+    )
+    episodes = eval_df["episode"].values if "episode" in eval_df.columns else np.arange(len(eval_df))
+
+    colours = [COLOUR_BUY if v >= 0 else COLOUR_SELL for v in eval_df["avg_return"].values]
+    fig.add_trace(go.Bar(x=episodes, y=eval_df["avg_return"].values,
+                         marker_color=colours, name="Avg Return"), row=1, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=episodes, y=eval_df["win_rate"].values,
+                             mode="lines+markers",
+                             line=dict(color="#42a5f5", width=2),
+                             name="Win Rate"), row=1, col=2)
+    fig.add_hline(y=50, line_dash="dot", line_color="gray", row=1, col=2)
+
+    fig.update_layout(
+        height=280,
+        margin=dict(l=10, r=10, t=40, b=10),
+        showlegend=False,
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="#fafafa"),
+    )
+    fig.update_xaxes(gridcolor="#1e2130", title="Episode")
+    fig.update_yaxes(gridcolor="#1e2130")
+    return fig
+
+
+def build_q_value_plot(ep_log: pd.DataFrame) -> go.Figure:
+    steps = ep_log["Step"].values
+    fig = go.Figure()
+    
+    # Handle both old format (Q_Cash/Q_Invest) and PPO format (Chosen_Q_Value)
+    if "Q_Cash" in ep_log.columns and "Q_Invest" in ep_log.columns:
+        fig.add_trace(go.Scatter(x=steps, y=ep_log["Q_Cash"].values,
+                                 line=dict(color=COLOUR_SELL, width=1.5), name="Q_Hold"))
+        fig.add_trace(go.Scatter(x=steps, y=ep_log["Q_Invest"].values,
+                                 line=dict(color=COLOUR_BUY, width=1.5), name="Q_Buy"))
+        title = "Q-Values Over Episode (Hold vs Buy)"
+    elif "Chosen_Q_Value" in ep_log.columns:
+        fig.add_trace(go.Scatter(x=steps, y=ep_log["Chosen_Q_Value"].values,
+                                 line=dict(color="#42a5f5", width=2), name="Chosen Q-Value"))
+        title = "Chosen Q-Value Over Episode"
+    else:
+        fig.add_trace(go.Scatter(x=steps, y=[0]*len(steps),
+                                 line=dict(color="gray", width=1), name="No Q-Data"))
+        title = "Q-Values (Not Available)"
+    
+    fig.update_layout(
+        title=title,
+        height=240,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h"),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="#fafafa"),
+    )
+    fig.update_xaxes(title="Step", gridcolor="#1e2130")
+    fig.update_yaxes(title="Q-Value", gridcolor="#1e2130")
+    return fig
+
+
+# ============================================================================
+# STYLED METRIC CARD
+# ============================================================================
+
+def metric_card(label: str, value: str, delta: str = "", colour: str = "#fafafa") -> None:
+    delta_html = f"<p style='font-size:0.78rem;color:#9e9e9e;margin:0'>{delta}</p>" if delta else ""
+    st.markdown(f"""
+    <div style='background:#1e2130;border-radius:8px;padding:14px 18px;margin-bottom:6px'>
+        <p style='font-size:0.75rem;color:#9e9e9e;margin:0;text-transform:uppercase;letter-spacing:0.08em'>{label}</p>
+        <p style='font-size:1.55rem;font-weight:700;color:{colour};margin:2px 0'>{value}</p>
+        {delta_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# MAIN DASHBOARD RENDER
+# ============================================================================
+
+def render_dashboard() -> None:
+    # ── Sidebar ──────────────────────────────────────────────────────────────
+    with st.sidebar:
+        st.title("⚙️ Dashboard Controls")
+        run_dir = detect_latest_run()
+
+        if run_dir:
+            run_name = os.path.basename(run_dir)
+            st.success(f"**Active run:**\n`{run_name}`")
+        else:
+            st.warning("No runs found under `output_data/`")
+            st.stop()
+
+        auto_refresh = st.toggle("Auto-refresh (2 s)", value=True)
+        st.caption(f"Root: `{os.path.abspath(OUTPUT_ROOT)}`")
+        st.divider()
+        st.markdown("**Run:**")
+        # Find all runs (both regular and PPO)
+        all_runs = sorted(
+            glob.glob(os.path.join(OUTPUT_ROOT, "run_*")) + 
+            glob.glob(os.path.join(OUTPUT_ROOT, "*ppo_run_*")),
+            key=os.path.getmtime, 
+            reverse=True
+        )
+        selected_run = st.selectbox(
+            "Select run", options=[os.path.basename(r) for r in all_runs],
+            index=0,
+        )
+        run_dir = os.path.join(OUTPUT_ROOT, selected_run)
+
+    # ── Load data ─────────────────────────────────────────────────────────────
+    metrics_df = load_episode_metrics(run_dir)
+    ep_log     = load_latest_episode_log(run_dir)
+    eval_df    = load_evaluation_history(run_dir)
+    final_eval = load_final_eval(run_dir)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown(
+        "<h1 style='margin-bottom:0'>📈 DQN Trading — Live Dashboard</h1>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Run: `{os.path.basename(run_dir)}` · Last refresh: `{time.strftime('%H:%M:%S')}`")
+    st.divider()
+
+    # ── SECTION A: Live Episode Monitor ───────────────────────────────────────
+    st.subheader("A — Live Episode Monitor")
+
+    if metrics_df is not None and len(metrics_df) > 0:
+        last = metrics_df.iloc[-1]
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        with c1:
+            metric_card("Episode", str(int(last["Episode"])))
+        with c2:
+            nw = last["Final_Net_Worth"]
+            metric_card("Net Worth", f"${nw:,.2f}",
+                        colour=COLOUR_BUY if nw >= 10000 else COLOUR_SELL)
+        with c3:
+            ret = last["Percent_Return"]
+            metric_card("Return", f"{ret:+.2f}%",
+                        colour=COLOUR_BUY if ret >= 0 else COLOUR_SELL)
+        with c4:
+            metric_card("Trades", str(int(last["Number_of_Trades"])))
+        with c5:
+            metric_card("Reward", f"{last['Total_Reward']:.4f}")
+        with c6:
+            total_eps = len(metrics_df)
+            win_rate  = (metrics_df["Percent_Return"] > 0).mean() * 100
+            metric_card("Win Rate", f"{win_rate:.1f}%",
+                        colour=COLOUR_BUY if win_rate >= 50 else COLOUR_SELL)
+    else:
+        st.info("Waiting for first episode to complete…")
+
+    st.divider()
+
+    # ── SECTION B: Equity Curve ────────────────────────────────────────────────
+    st.subheader("B — Live Equity Curve (Latest Episode)")
+
+    if ep_log is not None:
+        st.plotly_chart(build_equity_curve(ep_log), use_container_width=True)
+    else:
+        st.info("No episode logs found yet. Waiting for first logged episode…")
+
+    # ── SECTION B.5: Latest Step Action & Q-Values ────────────────────────────
+    st.subheader("B.5 — Latest Step: Action & Q-Values")
+    
+    if ep_log is not None and len(ep_log) > 0:
+        last_step = ep_log.iloc[-1]
+        
+        # Get action column name
+        action_col = _get_action_value_column(ep_log)
+        action_value = last_step[action_col]
+        
+        # Format action text
+        if action_col == "Action_Value":
+            action_text = _format_action_text(action_value)
+            q_preview = last_step.get("Q_Values_Preview", "N/A")
+            chosen_q = last_step.get("Chosen_Q_Value", "N/A")
+        else:
+            # Old format
+            action_text = "BUY" if action_value == 1 else "HOLD"
+            q_preview = f"Q_Hold={last_step.get('Q_Cash', 'N/A')}, Q_Buy={last_step.get('Q_Invest', 'N/A')}"
+            chosen_q = last_step.get("Chosen_Q_Value", "N/A")
+        
+        ac1, ac2, ac3, ac4 = st.columns(4)
+        with ac1:
+            metric_card("Latest Action", action_text, delta=f"Value: {action_value:.2f}")
+        with ac2:
+            metric_card("Chosen Q-Value", f"{chosen_q:.4f}")
+        with ac3:
+            price = last_step.get("Current_Price", 0)
+            metric_card("Current Price", f"${price:.2f}")
+        with ac4:
+            shares = last_step.get("Shares_Held", 0)
+            metric_card("Shares Held", f"{int(shares)}")
+        
+        # Q-values detail box
+        st.markdown(f"**Q-Values Preview:** {q_preview}")
+    else:
+        st.info("Waiting for first step data…")
+
+    st.divider()
+
+    # ── SECTION C: Risk Metrics ────────────────────────────────────────────────
+    st.subheader("C — Risk Metrics Panel")
+
+    if ep_log is not None and metrics_df is not None:
+        nw_arr   = ep_log["Net_Worth"].values
+        rewards  = metrics_df["Total_Reward"]
+        max_dd   = compute_max_drawdown(nw_arr)
+        roll_vol = compute_rolling_volatility(rewards)
+        sharpe   = compute_sharpe(rewards)
+        n_total  = len(ep_log)
+        expl_pct = ep_log["Decision_Reason"].str.contains("Exploration").mean() * 100
+        
+        # Handle both old and new Q-value column names
+        if "Q_Cash" in ep_log.columns and "Q_Invest" in ep_log.columns:
+            avg_qc = ep_log["Q_Cash"].mean()
+            avg_qi = ep_log["Q_Invest"].mean()
+            has_qc_qi = True
+        elif "Chosen_Q_Value" in ep_log.columns:
+            avg_qc = ep_log["Chosen_Q_Value"].mean()
+            avg_qi = 0  # Not applicable for PPO
+            has_qc_qi = True
+        else:
+            avg_qc = 0
+            avg_qi = 0
+            has_qc_qi = False
+
+        rc1, rc2, rc3, rc4, rc5, rc6 = st.columns(6)
+        with rc1:
+            metric_card("Max Drawdown", f"{max_dd:.2f}%",
+                        colour=COLOUR_SELL if max_dd < -2 else "#ffa726")
+        with rc2:
+            metric_card("Rolling Vol (20)", f"{roll_vol:.4f}")
+        with rc3:
+            metric_card("Sharpe-Like", f"{sharpe:.3f}",
+                        colour=COLOUR_BUY if sharpe > 0 else COLOUR_SELL)
+        with rc4:
+            metric_card("Exploration", f"{expl_pct:.1f}%")
+        with rc5:
+            if has_qc_qi and avg_qc > 0:
+                # Old format: show Q_Cash (Hold)
+                if "Q_Cash" in ep_log.columns:
+                    metric_card("Avg Q_Hold", f"{avg_qc:.4f}")
+                # PPO format: show average Chosen Q-value
+                else:
+                    metric_card("Avg Q-Value", f"{avg_qc:.4f}")
+            else:
+                metric_card("Avg Q", "N/A")
+        with rc6:
+            if has_qc_qi and "Q_Invest" in ep_log.columns and avg_qi > 0:
+                metric_card("Avg Q_Buy", f"{avg_qi:.4f}")
+            else:
+                metric_card("Metrics", "See Plot")
+
+        # Show Q-value plot if available (works for both old and new formats)
+        if "Q_Cash" in ep_log.columns or "Chosen_Q_Value" in ep_log.columns:
+            st.plotly_chart(build_q_value_plot(ep_log), use_container_width=True)
+    else:
+        st.info("Risk metrics available after first logged episode.")
+
+    st.divider()
+
+    # ── SECTION D: Distributions ───────────────────────────────────────────────
+    st.subheader("D — Distributions")
+
+    if metrics_df is not None and len(metrics_df) >= 2:
+        col_left, col_right = st.columns(2)
+        with col_left:
+            st.plotly_chart(build_return_histogram(metrics_df), use_container_width=True)
+        with col_right:
+            st.plotly_chart(build_trade_histogram(metrics_df), use_container_width=True)
+
+        st.plotly_chart(build_reward_curve(metrics_df), use_container_width=True)
+    else:
+        st.info("Distributions available after at least 2 episodes complete.")
+
+    st.divider()
+
+    # ── SECTION E: Evaluation Summary ─────────────────────────────────────────
+    st.subheader("E — Evaluation Summary")
+
+    eval_source = final_eval if final_eval is not None else eval_df
+
+    if eval_source is not None and len(eval_source) > 0:
+        row = eval_source.iloc[-1]
+
+        ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
+        with ec1:
+            wr = row["win_rate"]
+            metric_card("Win Rate", f"{wr:.1f}%",
+                        colour=COLOUR_BUY if wr >= 50 else COLOUR_SELL)
+        with ec2:
+            metric_card("Avg Return", f"{row['avg_return']:.2f}%",
+                        colour=COLOUR_BUY if row["avg_return"] >= 0 else COLOUR_SELL)
+        with ec3:
+            metric_card("Std Return", f"{row['std_return']:.2f}%")
+        with ec4:
+            metric_card("Best Return", f"{row['best_return']:.2f}%", colour=COLOUR_BUY)
+        with ec5:
+            metric_card("Worst Return", f"{row['worst_return']:.2f}%", colour=COLOUR_SELL)
+        with ec6:
+            metric_card("Avg Trades", f"{row['avg_trades']:.1f}")
+
+        if eval_df is not None and len(eval_df) >= 2:
+            st.plotly_chart(build_eval_timeline(eval_df), use_container_width=True)
+    else:
+        st.info("Evaluation data available after first evaluation checkpoint.")
+
+    # ── Auto-refresh ──────────────────────────────────────────────────────────
+    if auto_refresh:
+        time.sleep(REFRESH_INTERVAL_SEC)
+        st.rerun()
+
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+if __name__ == "__main__":
+    render_dashboard()
+else:
+    # Called by `streamlit run dashboard.py`
+    render_dashboard()
