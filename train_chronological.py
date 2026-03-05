@@ -289,10 +289,95 @@ def train_agent():
     # Save model
     torch.save(policy_net.state_dict(), os.path.join(base_dir, 'policy_net.pth'))
     
+    # Save rewards history
+    import csv
+    rewards_csv_path = os.path.join(base_dir, 'training_rewards.csv')
+    with open(rewards_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Episode', 'Total_Reward'])
+        for i, reward in enumerate(rewards_history, 1):
+            writer.writerow([i, reward])
+    
+    # Save episode metrics to CSV
+    import pandas as pd
+    metrics_df = pd.DataFrame(episode_metrics)
+    metrics_csv_path = os.path.join(base_dir, 'episode_metrics.csv')
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    
+    # Create summary statistics text file
+    summary_path = os.path.join(base_dir, 'training_summary.txt')
+    with open(summary_path, 'w') as f:
+        f.write("="*100 + "\n")
+        f.write("FAKE PPO TRAINING SUMMARY\n")
+        f.write("="*100 + "\n\n")
+        
+        f.write(f"Training Configuration:\n")
+        f.write(f"  Total Episodes:        {args.episodes}\n")
+        f.write(f"  Batch Size:            {args.batch_size}\n")
+        f.write(f"  Learning Rate:         {args.learning_rate}\n")
+        f.write(f"  Gamma (Discount):      {args.gamma}\n")
+        f.write(f"  Epsilon Decay:         {args.epsilon_decay}\n")
+        f.write(f"  Epsilon Min:           {args.epsilon_min}\n")
+        f.write(f"  Initial Balance:       ${args.initial_balance:,.2f}\n")
+        f.write(f"  Decision Interval:     {args.decision_interval} steps\n")
+        f.write(f"  Data Split Ratio:      {args.train_ratio*100:.1f}% train / {(1-args.train_ratio)*100:.1f}% test\n\n")
+        
+        f.write("="*100 + "\n")
+        f.write("EPISODE METRICS STATISTICS\n")
+        f.write("="*100 + "\n\n")
+        
+        # Calculate statistics
+        total_rewards = metrics_df['Total_Reward'].values
+        net_worths = metrics_df['Final_Net_Worth'].values
+        returns = metrics_df['Percent_Return'].values
+        trades = metrics_df['Number_of_Trades'].values
+        
+        f.write("TOTAL REWARD:\n")
+        f.write(f"  Average:               {total_rewards.mean():10.4f}\n")
+        f.write(f"  Std Dev:               {total_rewards.std():10.4f}\n")
+        f.write(f"  Min:                   {total_rewards.min():10.4f}\n")
+        f.write(f"  Max:                   {total_rewards.max():10.4f}\n")
+        f.write(f"  Median:                {np.median(total_rewards):10.4f}\n\n")
+        
+        f.write("FINAL NET WORTH ($):\n")
+        f.write(f"  Average:               ${net_worths.mean():10,.2f}\n")
+        f.write(f"  Std Dev:               ${net_worths.std():10,.2f}\n")
+        f.write(f"  Min:                   ${net_worths.min():10,.2f}\n")
+        f.write(f"  Max:                   ${net_worths.max():10,.2f}\n")
+        f.write(f"  Median:                ${np.median(net_worths):10,.2f}\n\n")
+        
+        f.write("PERCENT RETURN (%):\n")
+        f.write(f"  Average:               {returns.mean():10.2f}%\n")
+        f.write(f"  Std Dev:               {returns.std():10.2f}%\n")
+        f.write(f"  Min:                   {returns.min():10.2f}%\n")
+        f.write(f"  Max:                   {returns.max():10.2f}%\n")
+        f.write(f"  Median:                {np.median(returns):10.2f}%\n")
+        f.write(f"  Winning Episodes:      {(returns > 0).sum()} / {len(returns)}\n\n")
+        
+        f.write("NUMBER OF TRADES:\n")
+        f.write(f"  Average:               {trades.mean():10.2f}\n")
+        f.write(f"  Std Dev:               {trades.std():10.2f}\n")
+        f.write(f"  Min:                   {trades.min():10.0f}\n")
+        f.write(f"  Max:                   {trades.max():10.0f}\n")
+        f.write(f"  Median:                {np.median(trades):10.0f}\n\n")
+        
+        f.write("="*100 + "\n")
+        f.write("OUTPUT FILES\n")
+        f.write("="*100 + "\n\n")
+        f.write(f"Model Weights:         policy_net.pth\n")
+        f.write(f"Training Rewards:      training_rewards.csv\n")
+        f.write(f"Episode Metrics:       episode_metrics.csv\n")
+        f.write(f"Episode Logs (CSV):    episode_logs_csv/\n")
+        f.write(f"Performance Plots:     episode_logs_png/\n")
+        f.write(f"Summary Stats:         training_summary.txt\n\n")
+    
     print("\n" + "="*100)
     print("TRAINING COMPLETE")
     print("="*100)
     print(f"Model saved to: {base_dir}")
+    print(f"Training summary: {summary_path}")
+    print(f"Episode metrics: {metrics_csv_path}")
+    print(f"Training rewards: {rewards_csv_path}")
 
 
 if __name__ == "__main__":
