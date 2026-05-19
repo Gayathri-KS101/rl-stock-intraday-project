@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import pandas as pd
 import random
 import glob
 import argparse
@@ -65,7 +66,7 @@ def train_agent():
     
     parser = argparse.ArgumentParser(description='Train Fake PPO agent.')
     parser.add_argument('--episodes', type=int, default=200)
-    parser.add_argument('--log-episodes', type=int, default=10)
+    parser.add_argument('--log-episodes', type=int, default=1)
     parser.add_argument('--data-dir', type=str, default='processed_data')
     parser.add_argument('--initial-balance', type=float, default=10000)
     parser.add_argument('--train-ratio', type=float, default=0.7)
@@ -138,7 +139,7 @@ def train_agent():
 
     # Training loop
     print("="*100)
-    print("STARTING FAKE PPO TRAINING")
+    print("STARTING PPO TRAINING")
     print("="*100)
     
     for episode in range(args.episodes):
@@ -260,6 +261,13 @@ def train_agent():
         episode_metrics['Percent_Return'].append(percent_return)
         episode_metrics['Number_of_Trades'].append(env.num_trades)
 
+        # === LIVE DASHBOARD FIX: Write episode_metrics incrementally (every episode) ===
+        # This allows the Streamlit dashboard to refresh in real-time during training
+        metrics_df = pd.DataFrame(episode_metrics)
+        metrics_csv_path = os.path.join(base_dir, 'episode_metrics.csv')
+        metrics_df.to_csv(metrics_csv_path, index=False)
+        # ================================================================================
+
         # Log detailed episode if requested
         if should_log:
             log_df, log_path = save_episode_log(
@@ -298,11 +306,8 @@ def train_agent():
         for i, reward in enumerate(rewards_history, 1):
             writer.writerow([i, reward])
     
-    # Save episode metrics to CSV
-    import pandas as pd
-    metrics_df = pd.DataFrame(episode_metrics)
-    metrics_csv_path = os.path.join(base_dir, 'episode_metrics.csv')
-    metrics_df.to_csv(metrics_csv_path, index=False)
+    # NOTE: episode_metrics.csv is now written incrementally during training (line 263-268)
+    # so it's available for real-time dashboard updates
     
     # Create summary statistics text file
     summary_path = os.path.join(base_dir, 'training_summary.txt')
